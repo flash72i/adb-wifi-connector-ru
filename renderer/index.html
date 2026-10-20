@@ -1,0 +1,649 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; script-src 'self'; media-src 'self' blob:'">
+<title>ADB Wi-Fi Коннектор</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body data-theme="dark">
+
+<!-- ===== Титульная панель (кастомная рамка окна) ===== -->
+<header id="titlebar">
+  <div class="tb-left">
+    <img src="../assets/icon.png" alt="" class="tb-icon">
+    <span class="tb-title">ADB Wi-Fi Коннектор</span>
+    <span class="tb-badge" id="tb-version"></span>
+  </div>
+  <!-- v2.4: глобальное активное устройство — видно на всех страницах (R7/R8) -->
+  <select id="tb-device" data-tip="Активное устройство" autocomplete="off"></select>
+  <div class="tb-buttons">
+    <button class="tb-btn" id="btn-min" data-tip="Свернуть">&#x2500;</button>
+    <button class="tb-btn" id="btn-max" data-tip="Развернуть">&#x25A1;</button>
+    <button class="tb-btn tb-close" id="btn-close" data-tip="Закрыть">&#x2715;</button>
+  </div>
+</header>
+
+<div id="layout">
+  <!-- ===== Навигация ===== -->
+  <nav id="rail">
+    <button class="rail-item active" data-page="devices"><span class="rail-ico">&#128241;</span><span>Подключение</span></button>
+    <button class="rail-item" data-page="tools"><span class="rail-ico">&#128295;</span><span>Инструменты</span></button>
+    <button class="rail-item" data-page="files"><span class="rail-ico">&#128193;</span><span>Файлы</span></button>
+    <button class="rail-item" data-page="apps"><span class="rail-ico">&#128230;</span><span>Приложения</span></button>
+    <button class="rail-item" data-page="apk"><span class="rail-ico">&#128242;</span><span>Установка APK</span></button>
+    <button class="rail-item" data-page="settings"><span class="rail-ico">&#9881;</span><span>Настройки</span></button>
+    <div class="rail-spacer"></div>
+    <div class="rail-status" id="adb-status" data-tip="Состояние adb">&#8230;</div>
+  </nav>
+
+  <main id="content">
+
+    <!-- ================= СТРАНИЦА: ПОДКЛЮЧЕНИЕ ================= -->
+    <section class="page active" id="page-devices">
+      <div class="page-head">
+        <h1>Подключение</h1>
+        <button class="btn btn-text" id="btn-help">Как подключить?</button>
+      </div>
+
+      <div class="banner hidden" id="adb-banner">
+        <b>adb не найден.</b> Укажите путь к adb.exe в <a href="#" id="adb-banner-link">настройках</a> — иначе подключение невозможно.
+      </div>
+
+      <!-- Активное устройство (R7/R8): единая точка правды -->
+      <div class="card active-device hidden" id="active-card">
+        <div class="grow">
+          <div class="ad-name"><span class="dot"></span><span id="ad-name">—</span>
+            <span class="st-chip st-active" id="ad-chip">активно</span></div>
+          <div class="ad-serial" id="ad-serial" data-tip="Нажмите, чтобы скопировать"></div>
+          <div class="ad-chips" id="ad-chips"></div>
+        </div>
+        <div class="ad-actions">
+          <button class="btn btn-tonal btn-sm" id="btn-ad-info">Об устройстве</button>
+          <button class="btn btn-filled btn-sm" id="btn-ad-tools">Инструменты</button>
+          <button class="btn btn-text btn-sm" id="btn-ad-disc">Отключить</button>
+        </div>
+      </div>
+      <div class="card hidden" id="active-empty">
+        <b>Активное устройство не выбрано.</b>
+        <span class="muted">Подключите телефон любым способом ниже — он станет активным автоматически.
+        Активным может быть только одно устройство (R8: переключение — селектором сверху).</span>
+      </div>
+
+      <h2 class="section-title">Способы подключения</h2>
+      <div class="connect-ways">
+        <!-- (а) по IP -->
+        <div class="card">
+          <h3>&#127760; По IP-адресу</h3>
+          <p class="muted small">Если телефон уже сопряжён (или открыт порт 5555): введите адрес с экрана
+          «Беспроводная отладка» — строка «IP-адрес и порт».</p>
+          <div class="row">
+            <label class="field grow">
+              <span>IP-адрес устройства</span>
+              <input type="text" id="in-ip" placeholder="192.168.1.6 или 192.168.1.6:44515" spellcheck="false">
+            </label>
+            <label class="field w-port">
+              <span>Порт</span>
+              <input type="text" id="in-port" value="5555" spellcheck="false">
+            </label>
+          </div>
+          <div class="row" style="margin-top:10px">
+            <button class="btn btn-filled" id="btn-connect">Подключить</button>
+            <button class="btn btn-tonal" id="btn-scan">Сканировать сеть</button>
+          </div>
+          <div class="chips" id="recents-chips" style="margin-top:10px"></div>
+        </div>
+
+        <!-- (б) беспроводное сопряжение: код + QR на одной карточке (R1/R2/R4/R6) -->
+        <div class="card" id="pair-card">
+          <h3>&#128274; Беспроводное сопряжение <span class="muted small">(Android 11+, первый раз)</span></h3>
+          <p class="muted small">На телефоне: «Параметры разработчика» → «Беспроводная отладка» →
+          «Сопряжение устройства по коду». Введите показанные адрес и код — или покажите QR-код
+          и отсканируйте его камерой телефона.</p>
+          <div class="row">
+            <label class="field grow"><span>IP сопряжения</span><input type="text" id="pair-ip" placeholder="192.168.1.6" spellcheck="false"></label>
+            <label class="field w-port"><span>Порт</span><input type="text" id="pair-port" placeholder="37821" spellcheck="false"></label>
+            <label class="field w-code"><span>Код</span><input type="text" id="pair-code" placeholder="123456" spellcheck="false"></label>
+          </div>
+          <div class="row" style="margin-top:10px">
+            <button class="btn btn-filled" id="btn-do-pair">Сопрягнуть и подключить</button>
+            <button class="btn btn-tonal" id="btn-auto-pair" data-tip="Само найдёт порты, сопряжёт и подключит">Автопоиск портов</button>
+            <button class="btn btn-tonal" id="btn-find-port" data-tip="Найти открытый порт сопряжения на этом IP">Найти порт</button>
+          </div>
+          <div class="row" style="margin-top:8px">
+            <button class="btn btn-filled" id="btn-qr-show" data-tip="ПК покажет QR-код: на телефоне откройте «Беспроводная отладка» → «Подключить устройство по QR-коду» и наведите камеру (R2/R4)">&#9641; QR-код на телефон</button>
+            <button class="btn btn-text" id="btn-pair-mdns" data-tip="Если сопряжение уже выполнено — найдём телефон по mDNS и подключимся">Найти устройство по mDNS</button>
+          </div>
+          <pre id="pair-log" class="console short" style="margin-top:10px"></pre>
+        </div>
+      </div>
+
+      <div class="card hidden" id="scan-card">
+        <div class="row between">
+          <b id="scan-title">Сканирование локальной сети…</b>
+          <span id="scan-progress-text"></span>
+        </div>
+        <div id="scan-progress"><div class="progress"><div class="progress-bar" id="scan-bar"></div></div></div>
+        <div id="scan-results" class="list"></div>
+      </div>
+
+      <h2 class="section-title">Подключённые устройства</h2>
+      <div id="device-list" class="cards"></div>
+      <div class="empty hidden" id="device-empty">Нет подключённых устройств. Подключите телефон способами выше — он появится здесь и станет активным.</div>
+
+      <h2 class="section-title row between">Мои устройства
+        <button class="btn btn-text" id="btn-saved-add">Добавить вручную</button></h2>
+      <div id="saved-list" class="cards"></div>
+      <div class="empty hidden" id="saved-empty">Список пуст. Сохраните устройство — и подключайтесь в один клик.</div>
+
+      <h2 class="section-title">Избранное</h2>
+      <div id="fav-list" class="cards"></div>
+      <div class="empty hidden" id="fav-empty">Пусто. Добавьте устройство звёздочкой — оно будет подключаться при запуске, если включить это в настройках.</div>
+
+      <h2 class="section-title row between">История <button class="btn btn-text" id="btn-hist-clear">Очистить</button></h2>
+      <div id="hist-list" class="list"></div>
+      <div class="empty hidden" id="hist-empty">История пуста.</div>
+    </section>
+
+    <!-- ================= СТРАНИЦА: ИНСТРУМЕНТЫ ================= -->
+    <section class="page" id="page-tools">
+      <div class="page-head">
+        <h1>Инструменты устройства</h1>
+        <div class="row">
+          <span class="muted small" id="tools-active-label"></span>
+          <button class="btn btn-text" id="btn-devices-refresh" data-tip="Обновить список устройств">&#8635;</button>
+        </div>
+      </div>
+      <div class="empty hidden" id="tools-nodevice">Сначала подключите устройство на странице «Подключение» — инструменты заработают сразу.</div>
+
+      <div class="tools-grid" id="tools-grid">
+        <div class="card tool-card">
+          <h3>&#128247; Скриншот</h3>
+          <p class="muted">Снимок экрана устройства в PNG.</p>
+          <button class="btn btn-tonal" id="btn-screenshot">Сделать снимок</button>
+        </div>
+
+        <div class="card tool-card">
+          <h3>&#127909; Запись экрана</h3>
+          <p class="muted">Видео с экрана (до 3 минут), сохраняется в MP4.</p>
+          <div class="row">
+            <button class="btn btn-tonal" id="btn-record-start">Начать запись</button>
+            <button class="btn btn-filled hidden" id="btn-record-stop">Остановить <span id="rec-timer">00:00</span></button>
+          </div>
+        </div>
+
+        <div class="card tool-card wide">
+          <h3>&#128250; Трансляция экрана (встроенная)</h3>
+          <p class="muted">Видео экрана устройства прямо в окне приложения; клик/перетаскивание по экрану отправляются как касания.
+          Если устройство не отдаёт видеопоток — включится простой режим (снимки, ~2 кадра/с), управление работает всегда.</p>
+          <div class="row">
+            <button class="btn btn-filled" id="btn-mirror-start">Запустить трансляцию</button>
+            <button class="btn btn-filled hidden" id="btn-mirror-stop">Остановить</button>
+            <button class="btn btn-tonal" id="btn-mirror-fallback" data-tip="Переключить трансляцию в простой режим (снимки экрана) — помогает, когда видеопоток не играет">Простой режим</button>
+            <button class="btn btn-tonal" id="btn-mirror-ext" data-tip="Открыть отдельное окно scrcpy с полным управлением">Внешнее окно (scrcpy)</button>
+            <button class="btn btn-text" id="btn-mirror-back" data-tip="Назад на устройстве">&#8592; Назад</button>
+            <button class="btn btn-text" id="btn-mirror-home" data-tip="Домой">&#8962;</button>
+            <span class="muted small" id="mirror-fps" data-tip="Частота кадров трансляции"></span>
+          </div>
+          <div class="mirror-zone">
+            <div class="phone-frame" id="mirror-wrap">
+              <canvas id="mirror-canvas" width="720" height="1600" class="hidden"></canvas>
+              <div class="phone-placeholder" id="mirror-placeholder">
+                <div style="font-size:34px">&#128241;</div>
+                <div class="muted small">Экран устройства появится здесь<br>после запуска трансляции</div>
+              </div>
+            </div>
+            <div class="mirror-side">
+              <div class="muted small" id="mirror-status"></div>
+              <h3 style="margin:8px 0 6px;font-size:14px">&#127918; Панель управления устройством</h3>
+          <div class="chips">
+            <button class="chip" data-cmd="home" data-tip="Нажать кнопку «Домой» на устройстве">Домой</button>
+            <button class="chip" data-cmd="back" data-tip="Нажать «Назад» на устройстве">Назад</button>
+            <button class="chip" data-cmd="recents" data-tip="Открыть список недавних приложений">Недавние</button>
+            <button class="chip" data-cmd="power" data-tip="Кнопка питания: блокировка/включение экрана">Питание</button>
+            <button class="chip" data-cmd="wake" data-tip="Разбудить экран, не разблокируя">Разбудить</button>
+            <button class="chip" data-cmd="volup" data-tip="Громкость +">Громче</button>
+            <button class="chip" data-cmd="voldown" data-tip="Громкость −">Тише</button>
+            <button class="chip" data-cmd="media" data-tip="Плей/пауза медиа на устройстве">Плей/пауза</button>
+            <button class="chip" data-cmd="brightup" data-tip="Яркость экрана +">Ярче</button>
+            <button class="chip" data-cmd="brightdown" data-tip="Яркость экрана −">Тусклее</button>
+            <button class="chip" data-cmd="landscape" data-tip="Повернуть экран: альбомная ориентация">Альбомная</button>
+            <button class="chip" data-cmd="portrait" data-tip="Повернуть экран: портретная ориентация">Портретная</button>
+            <button class="chip chip-danger" data-cmd="reboot" data-tip="Полная перезагрузка устройства">Перезагрузка</button>
+            <button class="chip chip-danger" data-cmd="bootloader" data-tip="Перезагрузка в bootloader/fastboot">Bootloader</button>
+            <button class="chip chip-danger" data-cmd="recovery" data-tip="Перезагрузка в recovery">Recovery</button>
+          </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="card tool-card wide">
+          <h3>&#9000; Терминал (adb shell)</h3>
+          <p class="muted">Живая оболочка на устройстве + избранные команды (клик по чипу вставляет команду). Стрелки ↑/↓ — история команд.</p>
+          <div class="row">
+            <select id="shell-cmd-select" class="select grow" data-tip="Библиотека команд по производителям: наведите курсор, чтобы увидеть описание"></select>
+          </div>
+          <div class="muted small" id="shell-cmd-desc" style="margin:6px 0;min-height:16px"></div>
+          <pre id="shell-view" class="console"></pre>
+          <div class="row" style="position:relative">
+            <input type="text" id="shell-input" class="grow" placeholder="Команда shell — с автодополнением (Enter — выполнить)" spellcheck="false" autocomplete="off">
+            <div id="shell-ac" class="shell-ac hidden"></div>
+            <button class="btn btn-tonal" id="btn-shell-send">Выполнить</button>
+            <button class="btn btn-text" id="btn-shell-clear">Очистить</button>
+            <button class="btn btn-text" id="btn-shell-toggle">Запустить/остановить сессию</button>
+          </div>
+          <div class="row" style="margin-top:8px">
+            <button class="btn btn-tonal btn-sm" id="btn-shell-cmd-save" data-tip="Сохранить команду из поля ввода под понятным именем — в «Сохранения/Мои команды.json»">＋ Сохранить свою команду</button>
+            <button class="btn btn-text btn-sm" id="btn-shell-cmd-del" data-tip="Удалить выбранную СВОЮ команду из списка">✕ Удалить свою</button>
+          </div>
+        </div>
+
+        <div class="card tool-card wide">
+          <h3 data-tip="Logcat — поток системного журнала Android: логи приложений и системы для разработчиков. Безопасен для устройства.">&#128196; Logcat <span class="muted small">(системный журнал устройства; только чтение, на работу телефона не влияет)</span></h3>
+          <div class="row">
+            <button class="btn btn-tonal" id="btn-logcat-start">Запустить</button>
+            <button class="btn btn-filled hidden" id="btn-logcat-stop">Остановить</button>
+            <button class="btn btn-text" id="btn-logcat-pause" data-tip="Пауза/продолжение потока логов">Пауза</button>
+            <button class="btn btn-text" id="btn-logcat-clear">Очистить</button>
+            <input type="text" id="logcat-filter" class="input-sm" placeholder="Фильтр строк (подстрока)" spellcheck="false">
+          </div>
+          <pre id="logcat-view" class="console"></pre>
+        </div>
+
+        <div class="card tool-card wide">
+          <h3>&#129658; Диагностика беспроводного подключения</h3>
+          <button class="btn btn-tonal" id="btn-diag">Запустить диагностику</button>
+          <div id="diag-report" class="diag"></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ================= СТРАНИЦА: ФАЙЛЫ ================= -->
+    <section class="page" id="page-files">
+      <div class="page-head">
+        <h1>Файлы устройства</h1>
+        <div class="row">
+          <span class="muted small" id="fs-active-label"></span>
+          <button class="btn btn-text" id="btn-fs-back" data-tip="Вернуться в предыдущую папку" disabled>&#8592; Назад</button>
+          <button class="btn btn-text" id="btn-fs-up" data-tip="На уровень вверх">&#8593;</button>
+          <button class="btn btn-text" id="btn-fs-refresh" data-tip="Обновить">&#8635;</button>
+        </div>
+      </div>
+      <div class="muted small" id="fs-crumb" style="margin:-8px 0 8px"></div>
+      <div class="card">
+        <div class="row">
+          <input type="text" id="fs-path" class="grow" value="/sdcard" spellcheck="false" placeholder="Путь на устройстве (Enter — перейти)">
+          <button class="btn btn-tonal" id="btn-fs-go">Перейти</button>
+          <button class="btn btn-tonal" id="btn-fs-push">Загрузить на телефон</button>
+          <button class="btn btn-text" id="btn-fs-mkdir">Новая папка</button>
+        </div>
+        <div class="chips" id="fs-quick" style="margin-top:8px" data-tip="Быстрые переходы"></div>
+        <div class="chips" id="fs-volumes" style="margin-top:6px"></div>
+        <div class="muted small" id="fs-storage" style="margin-top:6px"></div>
+        <input type="text" id="fs-filter" class="input-sm" placeholder="Фильтр по имени…" spellcheck="false" style="margin-top:8px">
+        <div id="fs-list" class="list" style="margin-top:10px"></div>
+        <div class="empty hidden" id="fs-empty" style="margin-top:10px">
+          <div id="fs-empty-title" style="font-weight:600">Файлы появятся здесь сразу после подключения</div>
+          <div class="muted small" id="fs-empty-text">Подключите телефон на странице «Подключение» — список откроется сам, нажимать ничего не нужно.</div>
+          <button class="btn btn-tonal btn-sm" id="btn-fs-toconnect" style="margin-top:8px">Перейти к подключению</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- ================= СТРАНИЦА: ПРИЛОЖЕНИЯ ================= -->
+    <section class="page" id="page-apps">
+      <div class="page-head">
+        <h1>Приложения устройства</h1>
+        <div class="row">
+          <span class="muted small" id="apps-active-label"></span>
+          <button class="btn btn-text" id="btn-apps-refresh">&#8635;</button>
+        </div>
+      </div>
+      <div class="card">
+        <div class="row">
+          <div class="tabs" style="margin:0;border:0">
+            <button class="tab active" data-apptab="all">Все</button>
+            <button class="tab" data-apptab="user">Пользовательские</button>
+            <button class="tab" data-apptab="system">Системные</button>
+            <button class="tab" data-apptab="disabled">Отключённые</button>
+            <button class="tab" data-apptab="procs">Процессы</button>
+          </div>
+          <input type="text" id="apps-search" class="grow" placeholder="Поиск по имени или пакету…" spellcheck="false">
+          <select id="apps-sort" class="select" data-tip="Сортировка списка">
+            <option value="name">Сортировка: алфавит</option>
+            <option value="size_desc">Сортировка: размер ↓</option>
+            <option value="size_asc">Сортировка: размер ↑</option>
+            <option value="date_desc">Сортировка: дата ↓</option>
+            <option value="date_asc">Сортировка: дата ↑</option>
+            <option value="mem_desc">Сортировка: память ↓</option>
+          </select>
+          <button class="btn btn-tonal" id="btn-apps-names" data-tip="Переключить подписи: имена приложений ⟷ имена пакетов">Пакеты ⟷ Имена</button>
+          <button class="btn btn-tonal" id="btn-apps-backup">Резервная копия выбранных</button>
+          <button class="btn btn-tonal" id="btn-debloat" data-tip="Мастер очистки: показывает список системных приложений, которые обычно безопасно отключить (реклама, дубли, сервисы вендора). Отключение обратимо — пакет можно включить обратно.">Мастер очистки (debloat)</button>
+        </div>
+        <div class="row" id="apps-bar" style="margin-top:10px">
+          <div class="chips grow" id="apps-counts" style="margin:0"></div>
+          <button class="btn btn-tonal btn-sm hidden" id="btn-killall-procs" data-tip="Мягко завершить фоновые процессы всех пользовательских приложений (am kill — как кнопка «Не сохранять» в разработчике). Несохранённые данные не теряются.">Завершить все приложения</button>
+        </div>
+        <div id="apps-list" class="list" style="margin-top:10px"></div>
+      </div>
+    </section>
+
+    <!-- ================= СТРАНИЦА: УСТАНОВКА APK (v2.6) ================= -->
+    <section class="page" id="page-apk">
+      <div class="page-head">
+        <h1>Установка APK</h1>
+        <div class="row">
+          <span class="muted small">APK · XAPK · APKS · APKM · OBB · AAB</span>
+        </div>
+      </div>
+      <div class="card">
+        <div class="row">
+          <span class="muted">Устанавливать на:</span>
+          <select id="apk-target" class="select grow" data-tip="Устройство, на которое пойдёт установка" autocomplete="off"></select>
+          <button class="btn btn-text" id="btn-apk-target-refresh" data-tip="Обновить список устройств">&#8635;</button>
+          <button class="btn btn-filled" id="btn-apk2-installall" disabled>Установить всё</button>
+          <button class="btn btn-tonal hidden" id="btn-apk2-cancel" data-tip="Прервать очередь">Прервать</button>
+          <button class="btn btn-text" id="btn-apk2-clear" data-tip="Очистить список">Очистить</button>
+        </div>
+        <div id="apk2-drop" class="dropzone tall" style="margin-top:12px">Перетащите APK / XAPK / APKS / APKM / OBB сюда<br><span class="muted small">или</span><br><button class="btn btn-tonal" id="btn-apk2-pick" style="margin-top:8px">Выбрать файлы…</button></div>
+        <div class="muted small" id="apk2-summary" style="margin-top:10px">Список пуст — добавьте файлы, и я покажу имена, иконки, версии и пакеты.</div>
+        <div id="apk2-list" class="list" style="margin-top:8px"></div>
+      </div>
+    </section>
+
+    <!-- ================= СТРАНИЦА: НАСТРОЙКИ ================= -->
+    <section class="page" id="page-settings">
+      <div class="page-head"><h1>Настройки</h1></div>
+
+      <div class="card">
+        <h3>Пути</h3>
+        <label class="field">
+          <span>adb.exe <em class="muted" id="adb-ver-label"></em></span>
+          <div class="row">
+            <input type="text" id="set-adb-path" placeholder="Оставить пустым — использовать встроенный adb" class="grow">
+            <button class="btn btn-text" id="btn-pick-adb">Выбрать…</button>
+          </div>
+        </label>
+        <label class="field">
+          <span>scrcpy.exe</span>
+          <div class="row">
+            <input type="text" id="set-scrcpy-path" placeholder="Автопоиск в PATH" class="grow">
+            <button class="btn btn-text" id="btn-pick-scrcpy">Выбрать…</button>
+          </div>
+        </label>
+      </div>
+
+      <div class="card">
+        <h3>Поведение при запуске</h3>
+        <label class="switch-row"><span>Запускать вместе с Windows</span><label class="switch"><input type="checkbox" id="set-autostart"><span class="slider"></span></label></label>
+        <label class="switch-row"><span>Сворачивать в трей при закрытии</span><label class="switch"><input type="checkbox" id="set-tray"><span class="slider"></span></label></label>
+        <label class="switch-row" data-tip="По умолчанию выключено: приложение НЕ подключается к устройствам само, пока вы не включите этот пункт">
+          <span>Подключаться к последнему устройству при запуске <em class="muted small">(по умолчанию выключено)</em></span>
+          <label class="switch"><input type="checkbox" id="set-autolast"><span class="slider"></span></label></label>
+        <label class="switch-row" data-tip="Подключает первое доступное избранное устройство при запуске — только одно">
+          <span>При запуске подключать первое избранное устройство <em class="muted small">(по вашему выбору)</em></span>
+          <label class="switch"><input type="checkbox" id="set-autoreconnect"><span class="slider"></span></label></label>
+        <label class="switch-row"><span>Звуки действий</span><label class="switch"><input type="checkbox" id="set-sounds"><span class="slider"></span></label></label>
+        <label class="switch-row"><span>Сканировать сеть при запуске</span><label class="switch"><input type="checkbox" id="set-scanstart"><span class="slider"></span></label></label>
+        <label class="switch-row"><span>Тема оформления</span>
+          <select id="set-theme" class="select">
+            <option value="dark">Тёмная</option>
+            <option value="light">Светлая</option>
+          </select>
+        </label>
+        <p class="muted small" style="margin-top:8px">Без вашего явного выбора приложение никогда не подключается к устройствам самостоятельно (R3).</p>
+      </div>
+
+      <div class="card">
+        <h3>Ассоциации файлов (v2.6)</h3>
+        <p class="muted small">Открывать APK/XAPK/APKS/APKM/OBB/AAB двойным кликом в «ADB Wi-Fi Коннектор» — файл появится в очереди установки с иконкой и именем приложения. Работает на уровне системы (реестр HKCU).</p>
+        <label class="switch-row">
+          <span>Ассоциировать файлы приложений с этой программой</span>
+          <label class="switch"><input type="checkbox" id="set-assoc"><span class="slider"></span></label>
+        </label>
+        <div class="muted small" id="assoc-exts" style="margin:2px 0 6px;line-height:1.6"></div>
+        <p class="muted small" id="assoc-note"></p>
+      </div>
+
+      <div class="card">
+        <h3>Данные</h3>
+        <div class="row">
+          <button class="btn btn-tonal" id="btn-open-data">Открыть папку данных</button>
+          <button class="btn btn-text" id="btn-about">О программе</button>
+        </div>
+        <p class="muted small" id="data-dir-label"></p>
+      </div>
+    </section>
+  </main>
+</div>
+
+<!-- ===== Диалог: как подключить ===== -->
+<div class="overlay hidden" id="dlg-help">
+  <div class="dialog">
+    <div class="dialog-head"><h2>Как подключить</h2><button class="dlg-x" data-close="dlg-help">&#x2715;</button></div>
+    <ol class="help-list">
+      <li>На телефоне включите «Параметры разработчика» → «Беспроводная отладка».</li>
+      <li>Первый раз: нажмите «QR-код на телефон» — и отсканируйте код камерой телефона
+      (на телефоне: «Беспроводная отладка» → «Подключить устройство по QR-коду»); всё произойдёт автоматически.</li>
+      <li>Либо на экране «Сопряжение устройства по коду» введите адрес и код в карточке «Беспроводное сопряжение».</li>
+      <li>В следующие разы просто подключайтесь по IP (или из истории/избранного) — сопряжение уже выполнено.</li>
+      <li>Телефон и компьютер должны быть в одной сети Wi-Fi; сеть Windows — «Частная».</li>
+    </ol>
+    <div class="dialog-foot"><button class="btn btn-filled" data-close="dlg-help">Понятно</button></div>
+  </div>
+</div>
+
+<!-- ===== Диалог: подтверждение ===== -->
+<div class="overlay hidden" id="dlg-confirm">
+  <div class="dialog narrow">
+    <div class="dialog-head"><h2 id="confirm-title">Подтвердите действие</h2></div>
+    <p id="confirm-body" class="muted"></p>
+    <div class="dialog-foot">
+      <button class="btn btn-filled" id="confirm-yes">Выполнить</button>
+      <button class="btn btn-text" data-close="dlg-confirm">Отмена</button>
+    </div>
+  </div>
+</div>
+
+<!-- ===== Диалог: о программе ===== -->
+<div class="overlay hidden" id="dlg-about">
+  <div class="dialog narrow">
+    <div class="dialog-head"><h2>О программе</h2><button class="dlg-x" data-close="dlg-about">&#x2715;</button></div>
+    <p class="muted">ADB Wi-Fi Коннектор (RU), версия <span id="about-ver"></span>.<br>
+    Независимая русская сборка с открытым интерфейсом: без пробного периода, рекламы и встроенных покупок — все функции доступны сразу.<br>
+    В комплекте поставляется adb (Android SDK Platform-Tools) компании Google.</p>
+    <div class="dialog-foot"><button class="btn btn-filled" data-close="dlg-about">Закрыть</button></div>
+  </div>
+</div>
+
+<div class="overlay hidden" id="dlg-debloat">
+  <div class="dialog">
+    <div class="dialog-head"><h2>Мастер очистки системных приложений</h2><button class="dlg-x" data-close="dlg-debloat">&#x2715;</button></div>
+    <p class="muted small">Отметьте пакеты для отключения (удаляются только для текущего пользователя, можно вернуть).
+    «Осторожно» — может затронуть функции устройства.</p>
+    <div id="debloat-list" class="list" style="max-height:320px;overflow-y:auto"></div>
+    <div class="dialog-foot">
+      <button class="btn btn-filled" id="debloat-apply">Отключить выбранные</button>
+      <button class="btn btn-text" data-close="dlg-debloat">Закрыть</button>
+    </div>
+  </div>
+</div>
+
+<div class="overlay hidden" id="dlg-devinfo">
+  <div class="dialog narrow">
+    <div class="dialog-head"><h2>Об устройстве</h2><button class="dlg-x" data-close="dlg-devinfo">&#x2715;</button></div>
+    <div id="devinfo-body" class="muted small" style="line-height:1.7"></div>
+    <div class="dialog-foot"><button class="btn btn-filled" data-close="dlg-devinfo">Закрыть</button></div>
+  </div>
+</div>
+
+<div class="overlay hidden" id="dlg-appinfo">
+  <div class="dialog">
+    <div class="dialog-head"><h2 id="appinfo-title">Свойства приложения</h2><button class="dlg-x" data-close="dlg-appinfo">&#x2715;</button></div>
+    <div class="muted small mono" id="appinfo-sub" style="margin:-2px 0 6px"></div>
+    <div id="appinfo-body" class="muted small" style="line-height:1.7"></div>
+    <h3 style="margin:12px 0 6px;font-size:14px">Разрешения</h3>
+    <div id="appinfo-perms" class="list" style="max-height:220px;overflow-y:auto"></div>
+    <div class="dialog-foot" id="appinfo-actions"></div>
+  </div>
+</div>
+
+<!-- ===== Диалог: свойства файла/папки (F6) ===== -->
+<div class="overlay hidden" id="dlg-fsprop">
+  <div class="dialog narrow">
+    <div class="dialog-head">
+      <div class="row" style="gap:10px">
+        <img id="fsprop-icon" src="" alt="" style="width:38px;height:38px;border-radius:10px">
+        <h2 id="fsprop-title" style="font-size:16px;word-break:break-all">Свойства</h2>
+      </div>
+      <button class="dlg-x" data-close="dlg-fsprop">&#x2715;</button>
+    </div>
+    <div id="fsprop-body" class="muted small" style="line-height:1.75;margin-top:8px"></div>
+    <div class="dialog-foot">
+      <button class="btn btn-tonal btn-sm hidden" id="btn-fsprop-folder">Открыть эту папку</button>
+      <button class="btn btn-filled btn-sm" data-close="dlg-fsprop">Закрыть</button>
+    </div>
+  </div>
+</div>
+
+<!-- ===== Диалог: модальный ввод (замена системного диалога ввода) ===== -->
+<div class="overlay hidden" id="dlg-input">
+  <div class="dialog narrow">
+    <div class="dialog-head"><h2 id="input-title">Ввод</h2><button class="dlg-x" data-close="dlg-input">&#x2715;</button></div>
+    <p class="muted small" id="input-label" style="margin:6px 0"></p>
+    <input type="text" id="input-field" spellcheck="false">
+    <div class="dialog-foot">
+      <button class="btn btn-filled" id="input-ok">ОК</button>
+      <button class="btn btn-text" data-close="dlg-input">Отмена</button>
+    </div>
+  </div>
+</div>
+
+<!-- ===== Диалог: подключение по QR-коду (ПК показывает код, телефон сканирует камерой) ===== -->
+<div class="overlay hidden" id="dlg-qrpc">
+  <div class="dialog narrow">
+    <div class="dialog-head"><h2>Подключение по QR-коду</h2><button class="dlg-x" data-close="dlg-qrpc">&#x2715;</button></div>
+    <p class="muted small">На телефоне: <b>Настройки → Для разработчиков → Беспроводная отладка →
+    «Подключить устройство по QR-коду»</b> — откроется камера. Наведите её на QR-код и НЕ закрывайте
+    экран сканера: телефон сопряжётся и подключится автоматически (Android 11+).</p>
+    <div class="qrbox"><canvas id="qr-pc-canvas" width="260" height="260"></canvas></div>
+    <div class="qr-status" id="qr-pc-status">Готовим код…</div>
+    <div class="qrlog" id="qr-pc-log" aria-live="polite"></div>
+    <div class="dialog-foot">
+      <button class="btn btn-text hidden" id="btn-qr-retry">Другой код</button>
+      <button class="btn btn-tonal" data-close="dlg-qrpc" id="btn-qr-cancel">Отмена</button>
+    </div>
+  </div>
+</div>
+
+<!-- ===== Диалог: просмотр изображения (v2.6) ===== -->
+<div class="overlay hidden" id="dlg-imgview">
+  <div class="dialog imgview-dlg" id="imgview-shell">
+    <div class="dialog-head">
+      <h2 id="imgview-title" style="font-size:15px;word-break:break-all">Просмотр</h2>
+      <button class="dlg-x" data-close="dlg-imgview">&#x2715;</button>
+    </div>
+    <div class="row imgview-toolbar">
+      <button class="btn btn-tonal btn-sm" id="imgview-zout" data-tip="Уменьшить (колесо мыши)">−</button>
+      <span class="mono small" id="imgview-zoom" style="min-width:52px;text-align:center">100%</span>
+      <button class="btn btn-tonal btn-sm" id="imgview-zin" data-tip="Увеличить (колесо мыши)">+</button>
+      <button class="btn btn-tonal btn-sm" id="imgview-fit" data-tip="Вписать в окно">Вписать</button>
+      <button class="btn btn-tonal btn-sm" id="imgview-100" data-tip="Реальный размер 1:1">1:1</button>
+      <button class="btn btn-tonal btn-sm" id="imgview-rot" data-tip="Повернуть на 90°">&#8635;</button>
+      <span class="grow"></span>
+      <button class="btn btn-tonal btn-sm" id="imgview-prev" data-tip="Предыдущее изображение (←)">◀</button>
+      <span class="mono small" id="imgview-pos"></span>
+      <button class="btn btn-tonal btn-sm" id="imgview-next" data-tip="Следующее изображение (→)">▶</button>
+      <button class="btn btn-tonal btn-sm" id="imgview-full" data-tip="Во весь экран (двойной клик)">Во весь экран</button>
+    </div>
+    <div class="imgview-stage" id="imgview-stage">
+      <img id="imgview-img" class="imgview-img" alt="">
+      <div class="imgview-msg" id="imgview-msg">Загрузка…</div>
+    </div>
+    <div class="muted small" id="imgview-status" style="margin-top:6px"></div>
+  </div>
+</div>
+
+<!-- ===== Диалог: медиаплеер с эквалайзером и визуализацией (v2.6) ===== -->
+<div class="overlay hidden" id="dlg-media">
+  <div class="dialog media-dlg">
+    <div class="dialog-head">
+      <h2 id="media-title" style="font-size:15px;word-break:break-all">Плеер</h2>
+      <button class="dlg-x" data-close="dlg-media" id="btn-media-close">&#x2715;</button>
+    </div>
+    <div class="media-stage" id="media-stage">
+      <video id="media-el" class="hidden" playsinline></video>
+      <div id="media-visual" class="media-visual">
+        <canvas id="media-vis" width="640" height="220"></canvas>
+        <div class="media-3dwrap" id="media-3dwrap"><div class="media-cube" id="media-cube">&#9835;</div></div>
+      </div>
+    </div>
+    <div class="media-now">
+      <div class="media-name" id="media-now-name">—</div>
+      <div class="muted small" id="media-now-sub"></div>
+    </div>
+    <div class="media-controls">
+      <button class="btn btn-tonal btn-sm" id="media-prev" data-tip="Предыдущий файл из папки (←)">◀◀</button>
+      <button class="btn btn-filled btn-sm media-play" id="media-play" data-tip="Плей / пауза (пробел)">▶</button>
+      <button class="btn btn-tonal btn-sm" id="media-next" data-tip="Следующий файл из папки (→)">▶▶</button>
+      <span class="mono small" id="media-time">0:00 / 0:00</span>
+      <input type="range" id="media-seek" min="0" max="1000" value="0" class="grow" data-tip="Позиция воспроизведения">
+      <span data-tip="Громкость">&#128266;</span><input type="range" id="media-vol" min="0" max="100" value="80" style="width:80px">
+      <button class="btn btn-tonal btn-sm" id="media-eqbtn" data-tip="Эквалайзер и визуализация">EQ</button>
+      <button class="btn btn-tonal btn-sm" id="media-full" data-tip="Во весь экран">&#x26F6;</button>
+    </div>
+    <div id="media-eq" class="hidden">
+      <div class="eq-row" id="eq-bands"></div>
+      <div class="row" style="margin-top:8px">
+        <span class="muted small">Пресеты:</span>
+        <span class="chips" id="eq-presets"></span>
+        <span class="grow"></span>
+        <span class="muted small">Визуализация:</span>
+        <button class="chip eq-vchip active" data-vis="bars">Столбики</button>
+        <button class="chip eq-vchip" data-vis="wave">Волна</button>
+        <button class="chip eq-vchip" data-vis="circle">Круг</button>
+      </div>
+    </div>
+    <div class="muted small" id="media-status" style="margin-top:6px"></div>
+  </div>
+</div>
+
+<!-- ===== Диалог: мини-окно установки APK (ассоциация файлов, v2.6) ===== -->
+<div class="overlay hidden" id="dlg-apkmini">
+  <div class="dialog narrow">
+    <div class="dialog-head">
+      <div class="row" style="gap:10px">
+        <img id="apkmini-icon" src="" alt="" style="width:44px;height:44px;border-radius:12px;background:var(--surface-2)">
+        <h2 id="apkmini-title" style="font-size:16px;word-break:break-all">Установка APK</h2>
+      </div>
+      <button class="dlg-x" data-close="dlg-apkmini">&#x2715;</button>
+    </div>
+    <div class="muted small mono" id="apkmini-file" style="margin:6px 0;word-break:break-all"></div>
+    <div id="apkmini-body" class="muted small" style="line-height:1.75"></div>
+    <label class="field" style="margin-top:10px">
+      <span>Установить на устройство</span>
+      <select id="apkmini-target" class="select" autocomplete="off"></select>
+    </label>
+    <div class="dialog-foot">
+      <button class="btn btn-filled" id="apkmini-install">Установить</button>
+      <button class="btn btn-text" data-close="dlg-apkmini">Отмена</button>
+    </div>
+  </div>
+</div>
+
+<div id="fs-drop-overlay" class="drop-overlay hidden">
+  <div class="drop-box">
+    <div style="font-size:44px">&#128228;</div>
+    <h2>Отпустите файлы — загружу в папку</h2>
+    <div class="mono" id="fs-drop-dir"></div>
+  </div>
+</div>
+<div id="snackbar" class="snackbar hidden"></div>
+<script src="lib/qrcode.js"></script>
+<script src="fsicons.js"></script>
+<script src="cmdlib.js"></script>
+<script src="procdesc.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
