@@ -1393,6 +1393,9 @@ async function apkPickFiles() {
   const files = await window.api.pickFile({ properties: ['openFile', 'multiSelections'], filters: [{ name: 'Android пакеты', extensions: ['apk', 'aab', 'apks', 'xapk', 'apkm', 'obb', 'apup'] }] });
   if (files && files.length) apkAddFiles(files);
 }
+// v2.8.0: стартовая привязка для СТАТИЧЕСКОЙ кнопки из разметки (apkQRender перепривяжет
+// её при каждой перерисовке dropzone — кнопка пересоздаётся вместе с ней)
+$('#btn-apk2-pick').onclick = apkPickFiles;
 const apk2Drop = $('#apk2-drop');
 apk2Drop.ondragover = e => { e.preventDefault(); apk2Drop.classList.add('over'); };
 apk2Drop.ondragleave = () => apk2Drop.classList.remove('over');
@@ -2127,14 +2130,19 @@ function arcRenderList() {
   const q = ($('#arc-filter').value || '').toLowerCase();
   let list = arc.entries;
   if (q) list = list.filter(e => e.name.toLowerCase().includes(q));
-  box.innerHTML = list.map((e, i) => `<div class="list-row" data-arci="${i}">
-      <input type="checkbox" data-arcsel="${i}" ${e.dir ? 'disabled' : ''}>
+  // v2.8.0-fix: индексы — ТОЛЬКО глобальные (arc.entries.indexOf), иначе при активном
+  // фильтре «Посмотреть/Скачать/Извлечь» указывали на чужие файлы
+  box.innerHTML = list.map(e => {
+    const gi = arc.entries.indexOf(e);
+    return `<div class="list-row" data-arci="${gi}">
+      <input type="checkbox" data-arcsel="${gi}" ${e.dir ? 'disabled' : ''}>
       <span class="fs-ico-wrap"><img class="fs-ico" src="${window.FSICONS.iconFor(e.dir ? '' : e.name.split('/').pop(), e.dir).src}" alt=""></span>
       <span class="mono grow2" style="cursor:pointer">${esc(e.name)}</span>
       <span class="muted small">${e.dir ? 'папка' : fmtBytesLong(e.usize || 0)}</span>
-      ${e.dir ? '' : '<button class="btn btn-text btn-sm" data-arcview="' + i + '" data-tip="Посмотреть файл, не распаковывая архив">Посмотреть</button>'}
-      ${e.dir ? '' : '<button class="btn btn-text btn-sm" data-arcsave="' + i + '" data-tip="Сохранить файл на компьютер">Скачать</button>'}
-    </div>`).join('') || '<div class="empty">В архиве нет файлов под фильтр</div>';
+      ${e.dir ? '' : '<button class="btn btn-text btn-sm" data-arcview="' + gi + '" data-tip="Посмотреть файл, не распаковывая архив">Посмотреть</button>'}
+      ${e.dir ? '' : '<button class="btn btn-text btn-sm" data-arcsave="' + gi + '" data-tip="Сохранить файл на компьютер">Скачать</button>'}
+    </div>`;
+  }).join('') || '<div class="empty">В архиве нет файлов под фильтр</div>';
   box.querySelectorAll('.list-row .mono').forEach(el => el.ondblclick = () => {
     const row = el.closest('[data-arci]');
     const e = arc.entries[+row.dataset.arci];
