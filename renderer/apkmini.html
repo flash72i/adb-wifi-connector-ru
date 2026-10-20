@@ -38,6 +38,14 @@
     <select id="mini-target" class="select" autocomplete="off"></select>
   </label>
 
+  <!-- v2.7.2: ЯВНЫЙ статус подключения + поиск телефона по сети прямо из этого окна -->
+  <div class="row" style="margin-top:10px">
+    <span class="dev-status" id="mini-devstatus"><span class="dot off"></span><span id="mini-devtext">Проверяю устройства…</span></span>
+    <span class="grow"></span>
+    <button class="btn btn-text btn-sm" id="mini-find" data-tip="Найти телефон в сети (mDNS + сканирование подсети) и подключиться в один клик">Найти устройство</button>
+  </div>
+  <div id="mini-find-results" class="list" style="margin-top:8px;max-height:150px;overflow-y:auto"></div>
+
   <div class="row" style="margin-top:10px;align-items:center">
     <button class="btn btn-tonal" id="mini-connect" data-tip="Подключить это устройство (IP:порт), не открывая основную программу">Подключить…</button>
     <button class="btn btn-text" id="mini-refresh" data-tip="Обновить список устройств">&#8635;</button>

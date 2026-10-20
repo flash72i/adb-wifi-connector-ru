@@ -131,18 +131,24 @@
       <div id="device-list" class="cards"></div>
       <div class="empty hidden" id="device-empty">Нет подключённых устройств. Подключите телефон способами выше — он появится здесь и станет активным.</div>
 
-      <h2 class="section-title row between">Мои устройства
-        <button class="btn btn-text" id="btn-saved-add">Добавить вручную</button></h2>
-      <div id="saved-list" class="cards"></div>
-      <div class="empty hidden" id="saved-empty">Список пуст. Сохраните устройство — и подключайтесь в один клик.</div>
-
-      <h2 class="section-title">Избранное</h2>
-      <div id="fav-list" class="cards"></div>
-      <div class="empty hidden" id="fav-empty">Пусто. Добавьте устройство звёздочкой — оно будет подключаться при запуске, если включить это в настройках.</div>
-
-      <h2 class="section-title row between">История <button class="btn btn-text" id="btn-hist-clear">Очистить</button></h2>
-      <div id="hist-list" class="list"></div>
-      <div class="empty hidden" id="hist-empty">История пуста.</div>
+      <!-- v2.7.2: нижние списки — ровные группы: Мои устройства и Избранное в две колонки, История на всю ширину -->
+      <div class="dev-bottom">
+        <div class="dev-group">
+          <div class="row between"><h2 class="section-title" style="margin:14px 0 8px">Мои устройства</h2><button class="btn btn-text" id="btn-saved-add">Добавить вручную</button></div>
+          <div id="saved-list" class="cards"></div>
+          <div class="empty hidden" id="saved-empty">Список пуст. Сохраните устройство — и подключайтесь в один клик.</div>
+        </div>
+        <div class="dev-group">
+          <h2 class="section-title" style="margin:14px 0 8px">Избранное</h2>
+          <div id="fav-list" class="cards"></div>
+          <div class="empty hidden" id="fav-empty">Пусто. Добавьте устройство звёздочкой — оно будет подключаться при запуске, если включить это в настройках.</div>
+        </div>
+        <div class="dev-group wide">
+          <div class="row between"><h2 class="section-title" style="margin:14px 0 8px">История</h2><button class="btn btn-text" id="btn-hist-clear">Очистить</button></div>
+          <div id="hist-list" class="list"></div>
+          <div class="empty hidden" id="hist-empty">История пуста.</div>
+        </div>
+      </div>
     </section>
 
     <!-- ================= СТРАНИЦА: ИНСТРУМЕНТЫ ================= -->
@@ -217,8 +223,9 @@
           </div>
         </div>
 
-        <div class="card tool-card wide">
-          <h3>&#9000; Терминал (adb shell)</h3>
+        <div class="card tool-card wide collapse-card" id="card-terminal">
+          <h3 class="collapse-head" data-tip="Нажмите, чтобы развернуть или свернуть терминал">&#9000; Терминал (adb shell) <span class="muted small collapse-hint">— свёрнут; нажмите, чтобы развернуть</span></h3>
+          <div class="collapse-body">
           <p class="muted">Живая оболочка на устройстве + избранные команды (клик по чипу вставляет команду). Стрелки ↑/↓ — история команд.</p>
           <div class="row">
             <select id="shell-cmd-select" class="select grow" data-tip="Библиотека команд по производителям: наведите курсор, чтобы увидеть описание"></select>
@@ -236,10 +243,12 @@
             <button class="btn btn-tonal btn-sm" id="btn-shell-cmd-save" data-tip="Сохранить команду из поля ввода под понятным именем — в «Сохранения/Мои команды.json»">＋ Сохранить свою команду</button>
             <button class="btn btn-text btn-sm" id="btn-shell-cmd-del" data-tip="Удалить выбранную СВОЮ команду из списка">✕ Удалить свою</button>
           </div>
+          </div>
         </div>
 
-        <div class="card tool-card wide">
-          <h3 data-tip="Logcat — поток системного журнала Android: логи приложений и системы для разработчиков. Безопасен для устройства.">&#128196; Logcat <span class="muted small">(системный журнал устройства; только чтение, на работу телефона не влияет)</span></h3>
+        <div class="card tool-card wide collapse-card" id="card-logcat">
+          <h3 class="collapse-head" data-tip="Нажмите, чтобы развернуть или свернуть системный журнал">&#128196; Logcat <span class="muted small collapse-hint">— свёрнут; нажмите, чтобы развернуть</span></h3>
+          <div class="collapse-body">
           <div class="row">
             <button class="btn btn-tonal" id="btn-logcat-start">Запустить</button>
             <button class="btn btn-filled hidden" id="btn-logcat-stop">Остановить</button>
@@ -248,6 +257,7 @@
             <input type="text" id="logcat-filter" class="input-sm" placeholder="Фильтр строк (подстрока)" spellcheck="false">
           </div>
           <pre id="logcat-view" class="console"></pre>
+          </div>
         </div>
 
         <div class="card tool-card wide">
@@ -260,7 +270,7 @@
 
     <!-- ================= СТРАНИЦА: ФАЙЛЫ ================= -->
     <section class="page" id="page-files">
-      <div class="page-head">
+      <div class="page-head page-head-sticky">
         <h1>Файлы устройства</h1>
         <div class="row">
           <span class="muted small" id="fs-active-label"></span>
@@ -271,6 +281,8 @@
       </div>
       <div class="muted small" id="fs-crumb" style="margin:-8px 0 8px"></div>
       <div class="card">
+        <!-- v2.7.2: панель инструментов ЗАКРЕПЛЕНА: при прокрутке списка адрес, папки и кнопки остаются наверху -->
+        <div class="fs-sticky">
         <div class="row">
           <input type="text" id="fs-path" class="grow" value="/sdcard" spellcheck="false" placeholder="Путь на устройстве (Enter — перейти)">
           <button class="btn btn-tonal" id="btn-fs-go">Перейти</button>
@@ -299,6 +311,7 @@
         <div class="chips" id="fs-quick" data-tip="Быстрые переходы"></div>
         <div class="chips" id="fs-volumes" style="margin-top:6px"></div>
         <div class="muted small" id="fs-storage" style="margin-top:6px"></div>
+        </div><!-- /fs-sticky -->
         <div id="fs-list" class="list" style="margin-top:10px"></div>
         <div class="empty hidden" id="fs-empty" style="margin-top:10px">
           <div id="fs-empty-title" style="font-weight:600">Файлы появятся здесь сразу после подключения</div>
@@ -594,9 +607,9 @@
     </div>
     <div class="media-stage" id="media-stage">
       <video id="media-el" class="hidden" playsinline></video>
+      <video id="media-el2" class="hidden" playsinline></video>
       <div id="media-visual" class="media-visual">
         <canvas id="media-vis" width="960" height="320"></canvas>
-        <div class="media-3dwrap" id="media-3dwrap"><div class="media-cube" id="media-cube">&#9835;</div></div>
       </div>
     </div>
     <div class="media-now">
@@ -642,12 +655,18 @@
     </div>
     <div class="row imgview-toolbar">
       <button class="btn btn-tonal btn-sm" id="textview-wrap" data-tip="Включить/выключить перенос длинных строк">Перенос строк</button>
+      <button class="btn btn-tonal btn-sm hidden" id="textview-copy" data-tip="Скопировать весь текст в буфер обмена">Копировать</button>
+      <button class="btn btn-tonal btn-sm hidden" id="textview-edit" data-tip="Режим редактирования: правьте текст прямо здесь и сохраните на телефон">Редактировать</button>
+      <button class="btn btn-filled btn-sm hidden" id="textview-save" data-tip="Записать изменённый текст обратно на телефон (тот же путь)">Сохранить на телефон</button>
+      <button class="btn btn-tonal btn-sm hidden" id="textview-preview" data-tip="Показать HTML как страницу — превью прямо в программе">Превью</button>
+      <button class="btn btn-tonal btn-sm hidden" id="textview-code" data-tip="Вернуться к HTML-коду">Код</button>
       <span class="mono small" id="textview-pos"></span>
       <span class="grow"></span>
       <button class="btn btn-tonal btn-sm" id="textview-dl" data-tip="Скачать файл на компьютер">&#8681; Скачать</button>
       <button class="btn btn-tonal btn-sm" id="textview-openpc" data-tip="Открыть системной программой (браузер / PDF-читалка)">Открыть на ПК</button>
     </div>
     <pre id="textview-pre" class="textview-pre"></pre>
+    <iframe id="textview-frame" class="textview-frame hidden" sandbox="allow-scripts allow-same-origin allow-forms allow-popups"></iframe>
     <div id="pdfview-box" class="hidden">
       <canvas id="pdfview-canvas"></canvas>
       <div class="row" style="justify-content:center;margin-top:8px">

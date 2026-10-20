@@ -479,24 +479,17 @@ body[data-theme="light"] .st-online { color: #1e88e5; }
 .media-dlg.media-full { position: fixed; inset: 0; z-index: 400; width: 100vw; max-width: none; height: 100vh; max-height: none; border-radius: 0; overflow: hidden; background: #000; }
 .media-stage { position: relative; border-radius: 14px; overflow: hidden; background: #06090c; border: 1px solid var(--outline); min-height: 200px; display: flex; align-items: center; justify-content: center; }
 .media-full .media-stage { border-radius: 0; height: calc(100vh - 160px); }
-#media-el { width: 100%; max-height: 46vh; display: block; background: #000; }
-.media-full #media-el { max-height: none; height: 100%; object-fit: contain; }
-.media-visual { position: relative; width: 100%; display: flex; align-items: center; justify-content: center; padding: 6px 0; perspective: 700px; }
+#media-el, #media-el2 { width: 100%; max-height: 46vh; display: block; background: #000; }
+.media-full #media-el, .media-full #media-el2 { max-height: none; height: 100%; object-fit: contain; }
+.media-visual { position: relative; width: 100%; display: flex; align-items: center; justify-content: center; padding: 6px 0; }
 .media-visual.hidden-when-video { display: none; }
+/* v2.7.2: канвас визуализации тянется на всю сцену; РАЗРЕШЕНИЕ синхронизируется в app.js
+   (mpDraw) с фактическим размером — анимация заполняет весь экран ровно, без растягивания */
 #media-vis { width: 100%; height: 200px; display: block; }
-.media-3dwrap { position: absolute; left: 50%; top: 50%; transform-style: preserve-3d; pointer-events: none; }
-.media-cube {
-  width: 92px; height: 92px; border-radius: 24px; display: flex; align-items: center; justify-content: center;
-  font-size: 44px; color: #fff; transform-style: preserve-3d; will-change: transform;
-  background: linear-gradient(135deg, #4fc3f7 0%, #1976d2 55%, #7b1fa2 100%);
-  box-shadow: 0 0 0 1px rgba(255,255,255,.14) inset, 0 14px 40px rgba(30,120,210,.45), 0 0 60px rgba(120,60,220,.25);
-  animation: mediaCubeSpin 9s linear infinite;
-}
-@keyframes mediaCubeSpin {
-  0%   { transform: rotateY(0deg)   rotateX(9deg)  translateZ(0); }
-  50%  { transform: rotateY(180deg) rotateX(-9deg) translateZ(24px); }
-  100% { transform: rotateY(360deg) rotateX(9deg)  translateZ(0); }
-}
+.media-full .media-visual { height: calc(100vh - 160px); padding: 0; }
+.media-full #media-vis { height: 100%; }
+.media-dlg:fullscreen .media-visual, .media-dlg:-webkit-full-screen .media-visual { height: calc(100vh - 208px); padding: 0; }
+.media-dlg:fullscreen #media-vis, .media-dlg:-webkit-full-screen #media-vis { height: 100%; }
 .media-now { margin: 10px 2px 2px; }
 .media-name { font-weight: 600; font-size: 14.5px; word-break: break-all; }
 .media-controls { display: flex; align-items: center; gap: 8px; margin-top: 8px; flex-wrap: wrap; }
@@ -603,6 +596,60 @@ input[type="range"] { accent-color: var(--accent); }
 
 /* --- просмотр текста и PDF --- */
 .textview-dlg { width: 880px; }
+/* ==================== v2.7.2 ==================== */
+
+/* --- закреплённые панели страницы «Файлы»: заголовок с «Назад» и панель адреса/папок
+       остаются на месте при прокрутке списка (жалоба: «чтобы нажать назад — листаешь весь интерфейс») --- */
+#page-files .page-head-sticky {
+  position: sticky; top: 0; z-index: 9;
+  background: var(--bg);
+  margin-top: -18px;      /* добирает padding-top скроллера #content — прилипает вплотную к краю */
+  padding-top: 18px;
+  padding-bottom: 6px;
+}
+.fs-sticky {
+  position: sticky; top: 56px; z-index: 8;
+  background: var(--surface);
+  margin: -16px -16px 12px;
+  padding: 16px 16px 10px;
+  border-bottom: 1px solid var(--outline);
+  border-radius: var(--radius) var(--radius) 0 0;
+}
+
+/* --- страница «Подключение»: нижние списки выровнены ровными группами --- */
+.dev-bottom { display: grid; grid-template-columns: 1fr 1fr; gap: 0 16px; align-items: start; }
+.dev-group { min-width: 0; }
+.dev-group.wide { grid-column: 1 / -1; }
+@media (max-width: 980px) { .dev-bottom { grid-template-columns: 1fr; } }
+
+/* --- инструменты: терминал и логcat по умолчанию СВЁРНУТЫ, разворачиваются кликом по заголовку --- */
+.collapse-card .collapse-head { cursor: pointer; user-select: none; display: flex; align-items: center; gap: 8px; }
+.collapse-card .collapse-head::after { content: '\25B8'; margin-left: auto; color: var(--text-2); transition: transform .15s; font-size: 13px; }
+.collapse-card.open .collapse-head::after { transform: rotate(90deg); }
+.collapse-card .collapse-body { display: none; }
+.collapse-card.open .collapse-body { display: block; }
+.collapse-card .collapse-hint { font-weight: 400; }
+
+/* --- текстовый файл: HTML-превью во встроенном фрейме --- */
+.textview-frame {
+  width: 100%; height: 62vh; margin: 8px 0 0;
+  background: #fff; border: 1px solid var(--outline); border-radius: 10px;
+}
+.textview-pre[contenteditable="true"] { outline: 2px solid var(--accent); user-select: text; cursor: text; }
+
+/* --- мини-окно APK: явный статус устройства --- */
+.dev-status {
+  display: inline-flex; align-items: center; gap: 8px;
+  font-size: 12.5px; padding: 6px 12px; border-radius: 10px;
+  background: var(--surface-2); border: 1px solid var(--outline); max-width: 100%;
+}
+.dev-status.on { border-color: color-mix(in srgb, var(--ok) 55%, var(--outline)); }
+.mini-win #mini-body { padding-bottom: 18px; }
+
+/* --- вишня плеера v2.7.2: канвас не искажается, полный экран заполняется ровно
+       (разрешение синхронизируется в app.js; здесь только растяжение по CSS) --- */
+
+/* ==================== конец v2.7.2 ==================== */
 .textview-pre { margin: 8px 0 0; padding: 12px; background: var(--surface-2); border: 1px solid var(--outline);
   border-radius: 12px; height: 56vh; overflow: auto; font-family: var(--mono); font-size: 12.5px; line-height: 1.5; white-space: pre; }
 .textview-pre.wrap { white-space: pre-wrap; word-break: break-word; }
@@ -615,7 +662,6 @@ input[type="range"] { accent-color: var(--accent); }
 .media-vis-name { font-weight: 700; font-size: 13px; min-width: 150px; text-align: center; color: var(--accent); }
 #media-vis { width: 100%; height: 240px; display: block; }
 .media-full .media-visnav { display: none; }
-
 /* --- во весь ЭКРАН (монитор) через Fullscreen API --- */
 .media-dlg:fullscreen, .media-dlg:-webkit-full-screen { width: 100vw; max-width: none; height: 100vh; max-height: none; border-radius: 0; background: #000; padding: 10px 14px; }
 .media-dlg:fullscreen .media-stage, .media-dlg:-webkit-full-screen .media-stage { height: calc(100vh - 208px); min-height: 0; }

@@ -92,6 +92,8 @@ contextBridge.exposeInMainWorld('api', {
   fsVolumes: invoke('fs:volumes'),
   fsCat: invoke('fs:cat'),                  // v2.6: бинарное чтение файла (просмотрщик/плеер); v2.7: + maxMB
   fsOpenOnPc: invoke('fs:open-on-pc'),      // v2.7: скачать во временную папку и открыть системной программой (браузер/плеер/PDF)
+  fsSaveText: invoke('fs:save-text'),       // v2.7.2: записать отредактированный текстовый файл обратно на телефон
+  fsTmpWrite: invoke('fs:tmp-write'),       // v2.7.2: байты → временный локальный файл (HTML-превью)
   fsExtract: invoke('fs:extract'),          // v2.7: распаковка архива в папку с именем архива (свойства файла)
   shellOpenPath: invoke('shell:open-path'), // v2.7: открыть локальный файл системной программой
   apkLocalMeta: invoke('apk:localmeta'),    // v2.6: иконка/имя/пакет/версия локального APK

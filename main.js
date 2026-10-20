@@ -194,10 +194,25 @@ function connectDevice(host, port, opts = {}) {
   const run = async () => {
     const r = await adb.connect(host, port);
     if (!r.ok) return r;
+    // v2.7.2: adb connect может ответить «OK», а устройство остаться OFFLINE (устаревший порт:
+    // TCP приняли, но TLS/ключи не сошлись). Раньше это давало бесконечный цикл
+    // «connect OK → active lost» и спам ошибок в журнале. Проверяем фактическое состояние.
+    const serial = `${host}:${port}`;
+    let st = null;
+    for (const delay of [500, 900]) {
+      await sleep(delay);
+      const d = await adb.devices().catch(() => ({ ok: false, list: [] }));
+      st = (d.list || []).find(dd => dd.serial === serial);
+      if (st && st.state === 'device') break;
+    }
+    if (!st || st.state !== 'device') {
+      try { await adb.disconnect(serial); } catch (e) {}
+      return { ok: false, message: 'Порт ' + port + ' ответил, но устройство не перешло в состояние online — порт устарел. Порт меняется при каждом включении «Беспроводной отладки»: возьмите на телефоне ТЕКУЩИЙ порт.' };
+    }
     let name = opts.model || '';
     if (!name) { try { const m = await adb.modelName(`${host}:${port}`); name = m.model; } catch (e) {} }
     rememberDevice(host, port, name);
-    await enforceSingleDevice(`${host}:${port}`);
+    await enforceSingleDevice(serial);
     sendTask({ kind: 'connected', host, port });
     buildTrayMenu();
     return r;
@@ -252,14 +267,23 @@ function createWindow() {
   // окно не должно вылезать за рабочую область: на Windows с масштабом 125–150%
   // жёсткие размеры обрезаются системой — элементы «съезжают» (FIX-L1/L2, R4-2.3.1)
   const { screen } = require('electron');
-  let wa = { width: 1280, height: 800 };
-  try { wa = screen.getPrimaryDisplay().workAreaSize; } catch (e) {}
-  const saved = config.winBounds && Number.isFinite(config.winBounds.width) ? config.winBounds : null;
+  let wa = { x: 0, y: 0, width: 1280, height: 800 };
+  try { wa = screen.getPrimaryDisplay().workArea; } catch (e) {}
   const clamp = (v, lo, hi) => Math.max(lo, Math.min(v, hi));
-  const w = clamp(saved ? saved.width : 1080, 800, wa.width - 12);
-  const h = clamp(saved ? saved.height : 740, 560, wa.height - 12);
+  // v2.7.2: размер и ПОЗИЦИЯ окна — по ЗАМЕРУ владельца: 1159×835, X=420, Y=102.
+  // Замер ОДИН РАЗ применяется даже при наличии сохранённых границ (флаг winBoundsApplied272),
+  // дальше окно открывается там, куда его поставил пользователь.
+  const DEF = { x: 420, y: 102, width: 1159, height: 835 };
+  let b;
+  if (!config.winBoundsApplied272) { b = DEF; config.winBoundsApplied272 = true; }
+  else if (config.winBounds && Number.isFinite(config.winBounds.width)) b = config.winBounds;
+  else b = DEF;
+  const w = clamp(b.width || DEF.width, 800, wa.width - 12);
+  const h = clamp(b.height || DEF.height, 560, wa.height - 12);
+  const x = clamp(b.x != null ? b.x : DEF.x, wa.x, wa.x + Math.max(0, wa.width - w - 8));
+  const y = clamp(b.y != null ? b.y : DEF.y, wa.y, wa.y + Math.max(0, wa.height - h - 8));
   win = new BrowserWindow({
-    width: w, height: h, minWidth: Math.min(800, wa.width - 8), minHeight: Math.min(560, wa.height - 8),
+    x, y, width: w, height: h, minWidth: Math.min(800, wa.width - 8), minHeight: Math.min(560, wa.height - 8),
     show: false, frame: false, backgroundColor: '#0e1418',
     icon: path.join(__dirname, 'assets', 'icon.png'),
     webPreferences: {
@@ -268,16 +292,18 @@ function createWindow() {
     }
   });
   let boundsTimer = null;
-  win.on('resize', () => {
+  const saveBounds = () => {
     clearTimeout(boundsTimer);
     boundsTimer = setTimeout(() => {
       try {
         if (!win || win.isDestroyed() || win.isMinimized() || win.isMaximized()) return;
         const b = win.getBounds();
-        if (b.width >= 800 && b.height >= 560) { config.winBounds = { width: b.width, height: b.height }; saveConfig(); }
+        if (b.width >= 800 && b.height >= 560) { config.winBounds = { x: b.x, y: b.y, width: b.width, height: b.height }; saveConfig(); }
       } catch (e) {}
     }, 700);
-  });
+  };
+  win.on('resize', saveBounds);
+  win.on('move', saveBounds);   // v2.7.2: запоминаем и ПОЗИЦИЮ окна, не только размер
   win.loadFile(path.join(__dirname, 'renderer', 'index.html'),
     process.env.SCREENSHOT_PAGE ? { hash: process.env.SCREENSHOT_PAGE } : undefined);
   // renderer умер/перезапустился — гасим привязанные к нему потоки, иначе невидимые adb живут
@@ -735,7 +761,17 @@ function registerIpc() {
 
   // QR-подключение (Android 11+): статусы идут в renderer через task:event { kind:'qr-status', stage, message }
   ipcMain.handle('qr:start', async () => {
+    // v2.7.2: передаём QR-сессии «подсказку» — IP телефона (активное устройство или крайнее
+    // из истории): по нему работает ПРЯМОЕ сопряжение по портам даже без рабочего mDNS.
+    let hintHost = '';
+    try {
+      const d = await adb.devices();
+      const on = (d.list || []).find(x => x.state === 'device' && String(x.serial).includes(':'));
+      if (on) hintHost = String(on.serial).split(':')[0];
+    } catch (e) {}
+    if (!hintHost && history.length && history[0].host) hintHost = history[0].host;
     const r = qrpair.start({
+      hintHost,
       sendStatus: (stage, message, extra) => sendTask(Object.assign({ kind: 'qr-status', stage, message }, extra || {})),
       onConnected: (host, port, model) => {
         // R8: подключение через единую точку (enforce одного устройства внутри)
@@ -1388,9 +1424,32 @@ function registerIpc() {
         : { ok: false, label };
     } catch (e) { iconFail.add(pkg); return { ok: false, error: e.message }; }
   });
+  // v2.7.2: список ПОЛЬЗОВАТЕЛЬСКИХ пакетов (pm list packages -3) — чтобы на вкладке «Процессы»
+  // честно отделять пользовательские приложения от системных служб (com.android.* и т.п.).
+  const userPkgsCache = new Map(); // serial -> { pkgs:Set, ts }
+  async function userPackages(serial) {
+    const c = userPkgsCache.get(serial);
+    if (c && Date.now() - c.ts < 30000) return c.pkgs;
+    const pkgs = new Set();
+    try {
+      const r = await adb.run(['-s', serial, 'shell', 'pm', 'list', 'packages', '-3'], { timeout: 12000 });
+      if (r.ok) for (const line of (r.stdout || '').split(/\r?\n/)) {
+        const m = line.trim().match(/^package:(.+)$/);
+        if (m) pkgs.add(m[1].trim());
+      }
+    } catch (e) {}
+    userPkgsCache.set(serial, { pkgs, ts: Date.now() });
+    return pkgs;
+  }
   ipcMain.handle('procs:list', async (_e, serial) => {
     // RSS нужен для колонки памяти; на старых toybox -o может не быть — фолбэк на «ps -A»
-    let r = await adb.run(['-s', serial, 'shell', 'ps', '-A', '-o', 'PID,RSS,NAME'], { timeout: 15000 });
+    const [ps, upSet] = await Promise.all([
+      adb.run(['-s', serial, 'shell', 'ps', '-A', '-o', 'PID,RSS,NAME'], { timeout: 15000 }).catch(e => ({ ok: false, stdout: '', error: e.message })),
+      userPackages(serial)
+    ]);
+    const upArr = [...upSet];
+    const isUserPkg = n => upSet.has(n) || upArr.some(p => n.startsWith(p + ':'));
+    let r = ps;
     let simple = false;
     if (!r.ok || !/PID/.test(r.stdout || '')) {
       r = await adb.run(['-s', serial, 'shell', 'ps', '-A'], { timeout: 15000 });
@@ -1409,12 +1468,22 @@ function registerIpc() {
         if (mm) items.push({ pid: +mm[1], rss: +mm[2] || 0, name: mm[3].trim() });
       }
     }
+    for (const it of items) it.user = isUserPkg(it.name);
     return { ok: r.ok, items };
   });
-  ipcMain.handle('procs:kill', async (_e, serial, pid) => {
+  ipcMain.handle('procs:kill', async (_e, serial, pid, name) => {
+    // v2.7.2: «Убить» ДОЛЖЕН реально закрывать приложение. `kill -9` от shell запрещён
+    // (Operation not permitted — UID 2000 не может убить чужой UID). Правильный способ —
+    // `am force-stop <пакет>`: shell на него имеет право. Для системных процессов остаётся kill.
+    const pname = String(name || '');
+    if (pname.includes('.') && /^[\w.]+(:[\w-]+)?$/.test(pname)) {
+      const base = pname.split(':')[0];
+      const fs2 = await adb.run(['-s', serial, 'shell', 'am', 'force-stop', base], { timeout: 12000 });
+      if (fs2.ok) return { ok: true, message: 'Приложение ' + base + ' остановлено (am force-stop)' };
+    }
     const r = await adb.run(['-s', serial, 'shell', 'kill', '-9', String(pid)], { timeout: 10000 });
     if (!r.ok) logErr('procs:kill', serial, pid, (r.stderr || '').slice(0, 120));
-    return { ok: r.ok, message: (r.stdout || r.stderr).trim() };
+    return { ok: r.ok, message: (r.stdout || r.stderr).trim() || (r.ok ? 'OK' : 'kill не выполнен — для системного процесса нужны root-права') };
   });
   ipcMain.handle('wm:setsize', async (_e, serial, v) => {
     const args = v === 'reset' ? ['wm', 'size', 'reset'] : ['wm', 'size', v];
@@ -1466,6 +1535,31 @@ function registerIpc() {
     if (!r.ok) return { ok: false, error: 'Не удалось скачать файл: ' + ((r.stderr || r.error || '').trim().slice(0, 150) || 'ошибка') };
     const open = await shell.openPath(local);
     return open ? { ok: false, error: 'Файл скачан (' + local + '), но системная программа его не открыла: ' + open } : { ok: true, file: local };
+  });
+
+  /* ============ v2.7.2: редактор текстовых файлов с телефона ============ */
+  // 1) fs:save-text — записать отредактированный текст ОБРАТНО на телефон (b64 закодирован
+  //    в renderer: utf-8 или windows-1251, как был исходный файл); push поверх того же пути.
+  // 2) fs:tmp-write — сохранить байты во временную папку ПК (для HTML-превью во iframe).
+  ipcMain.handle('fs:save-text', async (_e, serial, remote, b64) => {
+    const exe = adb.getAdbPath();
+    if (!exe) return { ok: false, error: 'adb не найден' };
+    const tmp = path.join(os.tmpdir(), 'adbwifi-save-' + Date.now() + '.txt');
+    try { fs.writeFileSync(tmp, Buffer.from(String(b64 || ''), 'base64')); } catch (err) { return { ok: false, error: err.message }; }
+    const r = await adb.run(['-s', serial, 'push', tmp, remote], { timeout: 120000 });
+    try { fs.unlinkSync(tmp); } catch (err) {}
+    if (!r.ok) return { ok: false, error: 'Не удалось записать файл на телефон: ' + ((r.stderr || r.error || '').trim().slice(0, 150) || 'ошибка') };
+    return { ok: true };
+  });
+  ipcMain.handle('fs:tmp-write', async (_e, name, b64) => {
+    try {
+      const tmpDir = path.join(os.tmpdir(), 'adbwifi-open');
+      fs.mkdirSync(tmpDir, { recursive: true });
+      const local = path.join(tmpDir, String(name || ('f' + Date.now())).replace(/[\\/:*?"<>|]/g, '_'));
+      fs.writeFileSync(local, Buffer.from(String(b64 || ''), 'base64'));
+      return { ok: true, path: local };
+    } catch (err) { return { ok: false, error: err.message };
+    }
   });
 
   /* ================= v2.7.0: распаковка архива на устройстве (свойства → «Распаковать») ============ */
@@ -1562,7 +1656,8 @@ function registerIpc() {
       const [sz, mt] = ((st.stdout || '').trim().split('|'));
       const size = parseInt(sz, 10) || 0;
       if (size > 300 * 1024 * 1024) return { ok: false, reason: 'big', size };
-      try { e.sender.send('task:event', { kind: 'apk-meta-progress', file: path.basename(remotePath), size, stage: 'pull' }); } catch (err) {}
+      // v2.7.2: БЕЗ уведомлений и БЕЗ записей в логфайл на каждый файл (жалоба владельца:
+      // «изучаю файл, приложение» сыпалось и на экран, и в app.log — тысячи строк)
       fs.mkdirSync(ICON_CACHE, { recursive: true });
       const key = require('crypto').createHash('sha1').update(remotePath + '|' + size).digest('hex').slice(0, 20);
       const cachePng = path.join(ICON_CACHE, 'fs-' + key + '.png');
@@ -1574,8 +1669,6 @@ function registerIpc() {
       const tmp = path.join(os.tmpdir(), 'icon-' + key + '.apk');
       const t0 = Date.now();
       const pr = await adb.run(['-s', serial, 'pull', remotePath, tmp], { timeout: 900000 });
-      logInfo('apk-meta', path.basename(remotePath), 'pull', pr.ok ? (Math.round(size / 1048576) + ' МБ за ' + Math.round((Date.now() - t0) / 1000) + ' с') : 'НЕ УДАЛСЯ');
-      try { e.sender.send('task:event', { kind: 'apk-meta-progress', file: path.basename(remotePath), stage: pr.ok ? 'parse' : 'fail' }); } catch (err) {}
       if (!pr.ok) { fsApkFail.add(key); return { ok: false, reason: 'pull', size }; }
       let meta = null;
       try { meta = require('./apkicon.js').extractMeta(fs.readFileSync(tmp)); } catch (e) {}

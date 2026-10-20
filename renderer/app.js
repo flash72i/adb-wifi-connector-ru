@@ -343,7 +343,15 @@ async function refreshDevices() {
   } finally { refreshBusy = false; }
 }
 
-function logLostActive(serial) { try { window.api.uiLog('active lost: ' + serial); } catch (e) {} }
+// v2.7.2: «active lost» в журнале не чаще раза в 2 минуты на serial — раньше при устаревшем
+// порте сообщение спамило каждые 5 секунд (refreshDevices) и засоряло логфайл
+const _lostLoggedAt = {};
+function logLostActive(serial) {
+  const t = Date.now();
+  if (_lostLoggedAt[serial] && t - _lostLoggedAt[serial] < 120000) return;
+  _lostLoggedAt[serial] = t;
+  try { window.api.uiLog('active lost: ' + serial); } catch (e) {}
+}
 
 function renderDevices() {
   const box = $('#device-list');
@@ -982,6 +990,7 @@ let mirrorStallHandled = false, mirrorBlackRun = 0, mirrorGen = 0;
 // снимки экрана; теперь пробуем ступени: 0 — avcC (как было), 1 — Annex-B без description,
 // 2 — Annex-B + ПРОГРАММНОЕ декодирование (работает везде), и лишь потом — простой режим.
 let mirrorDecStage = 0, mirrorQueued = 0, mirrorFirstQueueAt = 0;
+let mirrorBounced = false;   // v2.7.2: однократный перезапуск потока, если заголовок/кадры не приходят
 const SC4 = new Uint8Array([0, 0, 0, 1]);
 // вотчдог «данные идут, а кадров нет»: реальный кейс владельца — декодер сконфигурирован,
 // байты капают, но ни один кадр так и не выдан → вечный чёрный экран (F15)
@@ -1018,10 +1027,21 @@ function mirrorFpsTick() {
   // F15/v2.7.1: поток живой (байты капают), а кадров нет → сначала пробуем ДРУГИЕ способы
   // декодирования (Annex-B → программный декодер, каждый раз со свежим потоком), и только
   // после них — снимки экрана. В v2.7.0 сразу включался простой режим — выглядело как «сломалось».
+  // v2.7.2: если в потоке ВООБЩЕ не появились SPS/PPS (заголовок кодека) или декодер ни разу
+  // не принял кадр — сначала ОДИН раз перезапускаем поток (bounce — свежий SPS/PPS/IDR):
+  // частая причина «данные идут, но декодер не принял поток» — пропущенное начало потока.
   if (mirrorMode === 'h264' && mirrorLastChunkAt && now - mirrorLastChunkAt < 3000 && !mirrorFrames) {
-    if (mirrorQueued > 0 && mirrorFirstQueueAt && now - mirrorFirstQueueAt > 2200) mirrorEscalate();
+    if (!mirrorSPS && now - mirrorLastChunkAt > 3200 && !mirrorBounced) {
+      mirrorBounced = true;
+      $('#mirror-status').textContent = 'Перезапускаю поток — жду заголовок кодека (SPS/PPS)…';
+      window.api.mirrorBounce().catch(() => {});
+    } else if (mirrorQueued > 0 && mirrorFirstQueueAt && now - mirrorFirstQueueAt > 2200) mirrorEscalate();
     else if (mirrorLastFrameAt && now - mirrorLastFrameAt > 6000 && !mirrorQueued) {
-      scheduleFallback('данные идут, но декодер так и не принял поток');
+      if (!mirrorBounced) {
+        mirrorBounced = true;
+        $('#mirror-status').textContent = 'Перезапускаю поток — декодер не принял ни кадра…';
+        window.api.mirrorBounce().catch(() => {});
+      } else scheduleFallback('данные идут, но декодер так и не принял поток');
     }
   }
 }
@@ -1205,6 +1225,7 @@ async function startMirror(serial, mode) {
   mirrorWaitingKey = false; mirrorStallHandled = false; mirrorBlackRun = 0;
   mirrorFrames = 0; mirrorFpsLast = 0; mirrorJpegSeq = 0;
   mirrorDecStage = 0; mirrorQueued = 0; mirrorFirstQueueAt = 0;
+  mirrorBounced = false;
   mirrorLastChunkAt = 0; mirrorLastFrameAt = 0;
   mirrorDecClose();
   // сбрасываем канвас: кадр прошлой сессии/устройства не должен выдаваться за новый
@@ -1661,7 +1682,7 @@ async function fsRender() {
       if (IMG_RE.test(it.name)) openImgViewer(fp);
       else if (VID_RE.test(it.name) || AUD_RE.test(it.name)) openMediaPlayer(fp);
       else if (TXT_RE.test(it.name) || PDF_RE.test(it.name)) openTextViewer(fp);
-      else if (HTML_RE.test(it.name)) openHtmlOnPc(fp, it.name);
+      else if (HTML_RE.test(it.name)) openTextViewer(fp); // v2.7.2: HTML — встроенный просмотр (Превью/Код), «Открыть на ПК» внутри
       else openFsProps(it);
     };
     root.querySelectorAll('[data-fsopen]').forEach(el => el.onclick = () => openItem(byIdx(+el.dataset.fsI)));
@@ -2018,18 +2039,54 @@ function toggleMonitorFullscreen(el) {
   $('#imgview-fullmon').onclick = () => toggleMonitorFullscreen($('#imgview-shell'));
 })();
 
-/* ================= v2.7.0: просмотр текстовых файлов (все форматы) и PDF ================= */
-const tv = { full: null, isPdf: false, pdfDoc: null, pdfPage: 1, pdfLibLoading: false };
+/* ================= v2.7.0: просмотр текстовых файлов (все форматы) и PDF =================
+   v2.7.2: + КОПИРОВАНИЕ, РЕДАКТИРОВАНИЕ с записью обратно на телефон (utf-8/windows-1251
+   сохраняется) и ПРЕВЬЮ HTML-файлов как страницы (iframe с локальной временной копии) */
+const tv = { full: null, isPdf: false, pdfDoc: null, pdfPage: 1, pdfLibLoading: false,
+             text: '', buf: null, encoding: 'utf-8', editing: false, isHtml: false, previewing: false };
+function bytesToB64(u8) {
+  let s = '', CH = 0x8000;
+  for (let i = 0; i < u8.length; i += CH) s += String.fromCharCode.apply(null, u8.subarray(i, i + CH));
+  return btoa(s);
+}
+// windows-1251 → байты (для файлов, открытых в 1251): А-Я/а-я → 0xC0..0xFF, Ё→0xA8, ё→0xB8
+function encode1251(str) {
+  const out = new Uint8Array(str.length);
+  for (let i = 0; i < str.length; i++) {
+    const c = str.charCodeAt(i);
+    if (c < 0x80) out[i] = c;
+    else if (c >= 0x410 && c <= 0x44F) out[i] = c - 0x410 + 0xC0;
+    else if (c === 0x401) out[i] = 0xA8;
+    else if (c === 0x451) out[i] = 0xB8;
+    else if (c === 0x2116) out[i] = 0xB9;      // №
+    else out[i] = 0x3F;                        // ? — символа нет в 1251
+  }
+  return out;
+}
+function tvButtons() {
+  $('#textview-copy').classList.toggle('hidden', tv.isPdf);
+  $('#textview-edit').classList.toggle('hidden', tv.isPdf || !tv.text);
+  $('#textview-save').classList.add('hidden');
+  $('#textview-preview').classList.toggle('hidden', !tv.isHtml);
+  $('#textview-code').classList.add('hidden');
+}
 async function openTextViewer(full) {
   const s = currentSerial(); if (!s) return;
   tv.full = full;
   tv.isPdf = PDF_RE.test(full);
+  tv.isHtml = HTML_RE.test(full);
+  tv.editing = false; tv.previewing = false; tv.text = ''; tv.buf = null; tv.encoding = 'utf-8';
   const name = full.split('/').pop();
   $('#textview-title').textContent = name;
   $('#textview-status').textContent = full;
   $('#textview-pos').textContent = '';
-  $('#textview-pre').classList.toggle('hidden', tv.isPdf);
+  $('#textview-pre').classList.remove('hidden');
+  const frame = $('#textview-frame');
+  frame.classList.add('hidden');
+  try { frame.src = 'about:blank'; } catch (e) {}
+  $('#textview-pre').contentEditable = 'false';
   $('#pdfview-box').classList.toggle('hidden', !tv.isPdf);
+  tvButtons();
   openDlg('dlg-textview');
   if (tv.isPdf) return loadPdf(full);
   const pre = $('#textview-pre');
@@ -2041,14 +2098,71 @@ async function openTextViewer(full) {
     if (r.capped) snack('Файл больше 8 МБ — показывать целиком не буду. Кнопка «Скачать» внизу работает.');
     return;
   }
+  tv.buf = new Uint8Array(r.buf);
   // декодирование: UTF-8, при сбое — windows-1251 (файлы с русским текстом в 866/1251)
-  let text;
-  try { text = new TextDecoder('utf-8', { fatal: true }).decode(r.buf); }
-  catch (e) { try { text = new TextDecoder('windows-1251').decode(r.buf); } catch (e2) { text = r.buf.toString('latin1'); } }
-  if (text.length > 400000) { text = text.slice(0, 400000); $('#textview-pos').textContent = '(показаны первые 400 000 символов)'; }
-  pre.textContent = text;
-  $('#textview-status').textContent = full + ' · ' + fmtBytesLong(r.bytes || 0);
+  try { tv.text = new TextDecoder('utf-8', { fatal: true }).decode(tv.buf); tv.encoding = 'utf-8'; }
+  catch (e) { try { tv.text = new TextDecoder('windows-1251').decode(tv.buf); tv.encoding = 'windows-1251'; } catch (e2) { tv.text = tv.buf.toString('latin1'); tv.encoding = 'latin1'; } }
+  const shown = tv.text.length > 400000 ? tv.text.slice(0, 400000) : tv.text;
+  $('#textview-pos').textContent = tv.text.length > 400000 ? '(показаны первые 400 000 символов)' : '';
+  pre.textContent = shown;
+  $('#textview-status').textContent = full + ' · ' + fmtBytesLong(r.bytes || 0) + (tv.encoding !== 'utf-8' ? ' · кодировка ' + tv.encoding : '');
+  tvButtons();
 }
+async function tvSaveBack() {
+  if (!tv.full || !tv.editing) return;
+  const s = currentSerial(); if (!s) return;
+  const pre = $('#textview-pre');
+  const clean = (pre.innerText || '').replace(/\u00A0/g, ' ');
+  const bytes = tv.encoding === 'windows-1251' ? encode1251(clean) : new TextEncoder().encode(clean);
+  const btn = $('#textview-save');
+  btn.disabled = true; btn.textContent = 'Сохраняю…';
+  const r = await window.api.fsSaveText(s, tv.full, bytesToB64(bytes));
+  btn.disabled = false; btn.textContent = 'Сохранить на телефон';
+  if (r.ok) {
+    tv.text = clean;
+    tv.editing = false;
+    pre.contentEditable = 'false';
+    pre.textContent = clean.length > 400000 ? clean.slice(0, 400000) : clean;
+    $('#textview-save').classList.add('hidden');
+    $('#textview-edit').classList.remove('hidden');
+    $('#textview-status').textContent = tv.full + ' · сохранено на телефон ✓';
+    snack('Сохранено на телефон: ' + tv.full.split('/').pop());
+  } else {
+    snack('Не удалось сохранить: ' + (r.error || 'ошибка'));
+  }
+}
+async function tvPreview() {
+  if (!tv.isHtml || !tv.buf) return;
+  const r = await window.api.fsTmpWrite(tv.full.split('/').pop(), bytesToB64(tv.buf));
+  if (!r.ok) return snack('Не удалось подготовить превью: ' + (r.error || ''));
+  $('#textview-frame').src = encodeURI('file:///' + String(r.path).replace(/\\/g, '/'));
+  $('#textview-frame').classList.remove('hidden');
+  $('#textview-pre').classList.add('hidden');
+  $('#textview-preview').classList.add('hidden');
+  $('#textview-code').classList.remove('hidden');
+  tv.previewing = true;
+  $('#textview-status').textContent = 'Превью страницы — скрипты и стили из самого файла работают; внешние ссылки (CDN) доступны только в браузере';
+}
+$('#textview-code').onclick = () => {
+  $('#textview-frame').classList.add('hidden');
+  $('#textview-pre').classList.remove('hidden');
+  $('#textview-code').classList.add('hidden');
+  $('#textview-preview').classList.remove('hidden');
+  tv.previewing = false;
+};
+$('#textview-preview').onclick = tvPreview;
+$('#textview-copy').onclick = () => { if (tv.text) copyText(tv.text.slice(0, 400000)); };
+$('#textview-edit').onclick = () => {
+  const pre = $('#textview-pre');
+  if (tv.previewing) $('#textview-code').click();
+  tv.editing = true;
+  pre.contentEditable = 'true';
+  pre.focus();
+  $('#textview-edit').classList.add('hidden');
+  $('#textview-save').classList.remove('hidden');
+  $('#textview-status').textContent = 'Режим редактирования — измените текст и нажмите «Сохранить на телефон»';
+};
+$('#textview-save').onclick = tvSaveBack;
 async function loadPdf(full) {
   const s = currentSerial(); if (!s) return;
   $('#pdfview-page').textContent = 'загрузка…';
@@ -2124,7 +2238,8 @@ async function openHtmlOnPc(full, name) {
 const mp = {
   list: [], idx: 0, isVideo: false,
   ctx: null, src: null, analyser: null, filters: [], out: null,
-  visIdx: 0, raf: 0, loadedUrl: null, wantPlay: true
+  visIdx: 0, raf: 0, loadedUrl: null, wantPlay: true,
+  direct: false, silT: 0   // v2.7.2: прямой звук — если WebAudio-граф молчит, играем мимо него
 };
 try { mp.visIdx = Math.min(window.VISLIB.length - 1, Math.max(0, parseInt(localStorage.getItem('media.vis') || '0', 10) || 0)); } catch (e) {}
 const EQ_FREQS = [31, 62, 125, 250, 500, 1000, 2000, 4000, 8000, 16000];
@@ -2195,6 +2310,13 @@ function mpDraw() {
   if ($('#dlg-media').classList.contains('hidden')) { mp.raf = 0; return; }
   mp.raf = requestAnimationFrame(mpDraw);
   const cv = $('#media-vis'), ctx = cv.getContext('2d');
+  // v2.7.2: битмап канваса = фактический размер на экране (DPR до 1.5) — раньше канвас был
+  // жёстко 960×320 и «растягивался» неровно в полном экране; теперь анимация заполняет
+  // окно/экран ровно при любом размере
+  const dpr = Math.min(1.5, window.devicePixelRatio || 1);
+  const cw = Math.max(64, Math.round(cv.clientWidth * dpr));
+  const ch = Math.max(48, Math.round(cv.clientHeight * dpr));
+  if (cv.width !== cw || cv.height !== ch) { cv.width = cw; cv.height = ch; }
   const W = cv.width, H = cv.height;
   // данные анализатора → амплитуды; на паузе спектр затухает к нулю, но ВРЕМЯ идёт —
   // поэтому каждая анимация продолжает жить (требование владельца)
@@ -2241,21 +2363,65 @@ async function mpLoad(full) {
     ? (/webm$/i.test(name) ? 'video/webm' : (/mkv|avi|ts$/i.test(name) ? 'video/x-matroska' : 'video/mp4'))
     : (/ogg|opus|oga$/i.test(name) ? 'audio/ogg' : /flac$/i.test(name) ? 'audio/flac' : /wav$/i.test(name) ? 'audio/wav' : /aac$/i.test(name) ? 'audio/aac' : /m4a$/i.test(name) ? 'audio/mp4' : /wma$/i.test(name) ? 'audio/x-ms-wma' : 'audio/mpeg');
   mp.loadedUrl = URL.createObjectURL(new Blob([r.buf], { type: mime }));
-  el.src = mp.loadedUrl;
   el.volume = (+$('#media-vol').value || 80) / 100;
   $('#media-now-sub').textContent = (mp.isVideo ? 'Видео' : 'Аудио') + ' · ' + fmtBytesLong(r.bytes || 0) + ' — запускаю…';
+  // v2.7.2: если звук уже переключен на прямой (граф молчал) — играем мимо эквалайзера
+  if (mp.direct) {
+    const el2 = $('#media-el2');
+    el2.src = mp.loadedUrl;
+    el2.volume = (+$('#media-vol').value || 80) / 100;
+    el.classList.add('hidden');
+    el2.classList.toggle('hidden', !mp.isVideo);
+    $('#media-now-sub').textContent = (mp.isVideo ? 'Видео' : 'Аудио') + ' · ' + fmtBytesLong(r.bytes || 0) + ' · прямое воспроизведение';
+    try { el2.load(); } catch (e) {}
+    el2.play().catch(() => { $('#media-now-sub').textContent = 'Не удалось запустить автоматически — нажмите ▶'; });
+    return;
+  }
   mpEnsureAudio();
   if (mp.ctx && mp.ctx.state === 'suspended') { try { await mp.ctx.resume(); } catch (e) {} }
   try { el.load(); } catch (e) {}
   try {
     await el.play();
     $('#media-now-sub').textContent = (mp.isVideo ? 'Видео' : 'Аудио') + ' · ' + fmtBytesLong(r.bytes || 0);
+    mpSilenceWatch();   // v2.7.2: проверка через 2,5 с — не молчит ли звук
   } catch (e) {
     // v2.7.0: автовоспроизведение разблокировано в main (autoplay-policy), но если кодек всё же
     // не взялся — честно сообщаем и оставляем кнопки «Скачать» и «На ПК» под рукой
     $('#media-now-sub').textContent = 'Не удалось запустить автоматически — нажмите ▶ или «На ПК»';
-    try { await el.play(); } catch (e2) {}
+    try { await el.play(); mpSilenceWatch(); } catch (e2) {}
   }
+}
+// v2.7.2: страховка «музыка не играет»: элемент играет, а звук молчит (WebAudio-контекст
+// подвис) — через 2,5 с переключаемся на ПРЯМОЕ воспроизведение мимо эквалайзера
+function mpSilenceWatch() {
+  clearTimeout(mp.silT);
+  mp.silT = setTimeout(() => {
+    const el = $('#media-el');
+    if (mp.direct || !mp.analyser || el.paused || mp.isVideo) return;
+    try {
+      const n = mp.analyser.frequencyBinCount;
+      const fd = new Uint8Array(n);
+      mp.analyser.getByteFrequencyData(fd);
+      let sum = 0; for (let i = 0; i < n; i++) sum += fd[i];
+      if (sum === 0 && !el.muted && el.volume > 0 && !el.error) mpGoDirect();
+    } catch (e) {}
+  }, 2500);
+}
+function mpGoDirect() {
+  if (mp.direct) return;
+  mp.direct = true;
+  const el = $('#media-el'), el2 = $('#media-el2');
+  const t = el.currentTime, wasPaused = el.paused;
+  try { el.pause(); } catch (e) {}
+  el.classList.add('hidden');
+  el2.classList.toggle('hidden', !mp.isVideo);
+  el2.src = mp.loadedUrl;
+  el2.volume = el.volume;
+  if (t > 0) { try { el2.currentTime = t; } catch (e) {} }
+  el2.play().catch(() => {});
+  if (!wasPaused) $('#media-play').textContent = '⏸';
+  $('#media-now-sub').textContent = (mp.isVideo ? 'Видео' : 'Аудио') + ' · прямое воспроизведение (эквалайзер отключён)';
+  snack('Звук не шёл через аудио-движок — переключил плеер на прямое воспроизведение');
 }
 async function openMediaPlayer(full) {
   mp.list = mediaList();
@@ -2273,27 +2439,34 @@ function mpNav(d) {
   mpLoad(fsDir.replace(/\/+$/, '') + '/' + mp.list[mp.idx].name);
 }
 (function mpEvents() {
-  const el = $('#media-el');
+  const el = $('#media-el'), el2 = $('#media-el2');
+  const curEl = () => mp.direct ? el2 : el;
+  function bindMedia(m) {
+    m.onplay = () => $('#media-play').textContent = '⏸';
+    m.onpause = () => $('#media-play').textContent = '▶';
+    m.onloadeddata = () => { if (m === curEl()) $('#media-now-sub').textContent = (mp.isVideo ? 'Видео' : 'Аудио') + ' · готово'; };
+    m.ontimeupdate = () => {
+      if (m !== curEl()) return;
+      $('#media-time').textContent = mpFmtTime(m.currentTime) + ' / ' + mpFmtTime(m.duration);
+      if (m.duration) $('#media-seek').value = Math.round(m.currentTime / m.duration * 1000);
+    };
+    m.onended = () => { if (m === curEl()) mpNav(1); };
+    m.onerror = () => {
+      if (m !== curEl()) return;
+      $('#media-now-sub').textContent = 'Этот формат/кодек браузер не играет (например mkv с редким кодеком) — нажмите «На ПК», там проиграет системный плеер';
+      $('#media-status').textContent = 'Кодек не поддержан Chromium. Кнопки «Скачать» и «На ПК» выше — рабочие.';
+    };
+  }
+  bindMedia(el); bindMedia(el2);
   $('#media-play').onclick = async () => {
-    if (!el.src) return;
+    const m = curEl();
+    if (!m.src) return;
     mpEnsureAudio();
     if (mp.ctx && mp.ctx.state === 'suspended') { try { await mp.ctx.resume(); } catch (e) {} }
-    el.paused ? el.play() : el.pause();
+    m.paused ? m.play() : m.pause();
   };
-  el.onplay = () => $('#media-play').textContent = '⏸';
-  el.onpause = () => $('#media-play').textContent = '▶';
-  el.onloadeddata = () => { $('#media-now-sub').textContent = (mp.isVideo ? 'Видео' : 'Аудио') + ' · готово'; };
-  el.ontimeupdate = () => {
-    $('#media-time').textContent = mpFmtTime(el.currentTime) + ' / ' + mpFmtTime(el.duration);
-    if (el.duration) $('#media-seek').value = Math.round(el.currentTime / el.duration * 1000);
-  };
-  el.onended = () => mpNav(1);
-  el.onerror = () => {
-    $('#media-now-sub').textContent = 'Этот формат/кодек браузер не играет (например mkv с редким кодеком) — нажмите «На ПК», там проиграет системный плеер';
-    $('#media-status').textContent = 'Кодек не поддержан Chromium. Кнопки «Скачать» и «На ПК» выше — рабочие.';
-  };
-  $('#media-seek').oninput = () => { if (el.duration) el.currentTime = (+$('#media-seek').value / 1000) * el.duration; };
-  $('#media-vol').oninput = () => { el.volume = (+$('#media-vol').value) / 100; };
+  $('#media-seek').oninput = () => { const m = curEl(); if (m.duration) m.currentTime = (+$('#media-seek').value / 1000) * m.duration; };
+  $('#media-vol').oninput = () => { const m = curEl(); m.volume = (+$('#media-vol').value) / 100; };
   $('#media-prev').onclick = () => mpNav(-1);
   $('#media-next').onclick = () => mpNav(1);
   $('#media-eqbtn').onclick = () => { mpEnsureAudio(); $('#media-eq').classList.toggle('hidden'); };
@@ -2309,9 +2482,28 @@ function mpNav(d) {
     const r = await window.api.fsOpenOnPc(currentSerial(), fsDir.replace(/\/+$/, '') + '/' + f.name);
     snack(r.ok ? 'Открыто в системном плеере' : (r.error || 'Не удалось'));
   };
-  // v2.7.0: две кнопки полного экрана — внутри программы И на весь монитор
-  $('#media-full').onclick = () => $('#dlg-media .media-dlg').classList.toggle('media-full');
+  // v2.7.2: «В окне» — большой режим внутри программы; согласован с «На весь монитор»:
+  // из полноэкранного монитора эта кнопка возвращает в ОБЫЧНОЕ окно (раньше «не работала»)
+  let mpFullPreFs = false;
+  $('#media-full').onclick = () => {
+    if (document.fullscreenElement || document.webkitFullscreenElement) {
+      mpFullPreFs = false;
+      (document.exitFullscreen || document.webkitExitFullscreen).call(document);
+      return;
+    }
+    $('#dlg-media .media-dlg').classList.toggle('media-full');
+  };
   $('#media-fullmon').onclick = () => toggleMonitorFullscreen($('#dlg-media .media-dlg'));
+  const fsSyncMedia = () => {
+    const dlg = $('#dlg-media .media-dlg');
+    if (document.fullscreenElement || document.webkitFullscreenElement) {
+      mpFullPreFs = dlg.classList.contains('media-full');
+    } else {
+      dlg.classList.toggle('media-full', mpFullPreFs);
+    }
+  };
+  document.addEventListener('fullscreenchange', fsSyncMedia);
+  document.addEventListener('webkitfullscreenchange', fsSyncMedia);
   // v2.7.0: стрелки навигации визуализаций (номер + название, выбор запоминается)
   $('#media-vis-prev').onclick = () => mpVisNav(-1);
   $('#media-vis-next').onclick = () => mpVisNav(1);
@@ -2322,6 +2514,10 @@ function mpNav(d) {
     if (e.key === 'ArrowLeft') { if (e.shiftKey) mpVisNav(-1); else mpNav(-1); }
     if (e.key === 'ArrowRight') { if (e.shiftKey) mpVisNav(1); else mpNav(1); }
     if (e.key === 'v' || e.key === 'V' || e.key === 'м' || e.key === 'М') mpVisNav(1);
+    if (e.key === 'Escape' && $('#dlg-media .media-dlg').classList.contains('media-full') &&
+        !document.fullscreenElement && !document.webkitFullscreenElement) {
+      $('#dlg-media .media-dlg').classList.remove('media-full');  // Esc — выход из «в окне»
+    }
   });
   // просмотрщик: стрелки листают фото
   document.addEventListener('keydown', e => {
@@ -2451,19 +2647,23 @@ function appSub(pkg) {
   if (state.config.showPkgNames) return appLabels[pkg] || '';
   return pkg;
 }
-// v2.7.0: вкладка процессов — фильтр «все/только приложения» + ИКОНКИ процессов.
-// Иконки берём ТОЛЬКО из кэша (apps:icon-peek — без скачивания APK); если иконки нет —
-// у приложений зелёный Android-робот, у системных служб — шестерёнка. Кто в списке «Приложений»
-// уже показывался с иконкой — получит её и здесь мгновенно.
-let procTab = 'all';
+// v2.7.2: вкладка процессов — по умолчанию ТОЛЬКО ПОЛЬЗОВАТЕЛЬСКИЕ приложения (жалоба:
+// «почему не пользовательские приложения — должны отображаться только нестандартные»),
+// список пользовательских пакетов берётся из `pm list packages -3` (флаг user из main).
+// Иконки — из кэша (apps:icon-peek — без скачивания APK); если иконки нет — зелёный робот.
+let procTab = 'user';
 let procIconsRendered = new Set();
+function app_kill_text(kn) {
+  return kn.includes('.')
+    ? 'Остановить приложение ' + kn + ' целиком (все его процессы)? Приложение исчезнет из списка и реально закроется.'
+    : 'Убить процесс ' + kn + '? Системному процессу shell не имеет права — может не получиться.';
+}
 async function procsRender() {
   const s = currentSerial(); if (!s) return;
   const r = await window.api.procsList(s);
   const q = ($('#apps-search').value || '').toLowerCase();
-  const isApp = x => /^(com|org|net|ru|io)\./.test(x.name);
+  const isApp = x => (x.user != null) ? x.user : /^(com|org|net|ru|io)\./.test(x.name);
   let items = (r.items || []).slice();
-  // v2.7.0: фильтр пользовательских процессов (кнопка-чип над списком)
   if (procTab === 'user') items = items.filter(x => isApp(x));
   // v2.6: приложения — наверх; сортировка из селекта (имя/память)
   if (appsSort === 'mem_desc') items.sort((a, b) => (isApp(b) - isApp(a)) || (b.rss - a.rss));
@@ -2475,9 +2675,9 @@ async function procsRender() {
     return FB;
   };
   const appCount = items.filter(isApp).length;
-  // v2.7.0: строка статуса + чип фильтра «Только пользовательские приложения»
-  $('#apps-counts').innerHTML = '<button class="chip' + (procTab === 'all' ? ' view-chip active' : '') + '" id="proc-tab-all" data-tip="Показать все процессы — и приложения, и системные службы">Все процессы</button>' +
-    '<button class="chip' + (procTab === 'user' ? ' view-chip active' : '') + '" id="proc-tab-user" data-tip="Показать ТОЛЬКО процессы пользовательских приложений">Только приложения</button>' +
+  // v2.7.2: чипы фильтра — «Пользовательские приложения» (по умолчанию) и «Все процессы»
+  $('#apps-counts').innerHTML = '<button class="chip' + (procTab === 'user' ? ' view-chip active' : '') + '" id="proc-tab-user" data-tip="Только УСТАНОВЛЕННЫЕ Вами приложения (pm list -3) — системные службы Android скрыты">Пользовательские приложения</button>' +
+    '<button class="chip' + (procTab === 'all' ? ' view-chip active' : '') + '" id="proc-tab-all" data-tip="Показать все процессы — и приложения, и системные службы">Все процессы</button>' +
     '<span class="count-chip">Показано: <b>' + items.length + '</b></span>' +
     '<span class="count-chip cc-user">Приложений: <b>' + appCount + '</b></span>';
   const tabAll = document.getElementById('proc-tab-all'), tabUser = document.getElementById('proc-tab-user');
@@ -2485,7 +2685,7 @@ async function procsRender() {
   if (tabUser) tabUser.onclick = () => { procTab = 'user'; procsRender(); };
   $('#btn-killall-procs').classList.remove('hidden');
   $('#apps-list').innerHTML = items.slice(0, 400).map(x => {
-    const app = /^(com\.|^org\.|^net\.|^ru\.)/.test(x.name);
+    const app = isApp(x);
     const d = descFor(x.name);
     const safeId = 'pico-' + x.name.replace(/[^a-z0-9]/gi, '_') + '-' + x.pid;
     return `<div class="list-row proc-row">
@@ -2496,19 +2696,28 @@ async function procsRender() {
       <span class="proc-main grow2"><span class="proc-name">${esc(x.name)}</span><span class="proc-desc muted small">${esc(d)}</span></span>
       <span class="muted small proc-rss" data-tip="Память, занятая процессом">${x.rss ? fmtBytes(x.rss * 1024) : '—'}</span>
       ${app ? '<span class="st-chip st-online proc-kind" data-tip="Это процесс приложения">приложение</span>' : '<span class="st-chip st-off proc-kind" data-tip="Системная служба Android — трогать не стоит">система</span>'}
-      <button class="btn btn-text btn-sm" data-kill="${x.pid}" data-tip="Принудительно остановить процесс (kill -9). Служба может перезапуститься, приложение — потеряет несохранённое">Убить</button>
+      <button class="btn btn-text btn-sm" data-kill="${x.pid}" data-kname="${esc(x.name)}" data-tip="${app ? 'Остановить приложение ЦЕЛИКОМ (am force-stop) — закроет все его процессы и исчезнет из списка' : 'Принудительно остановить процесс (kill -9)'}">Убить</button>
     </div>`;
   }).join('') || '<div class="empty">Нет процессов</div>';
   $$('#apps-list [data-kill]').forEach(b => b.onclick = async () => {
-    const yes = await uiConfirm('Остановка процесса', 'Убить процесс PID ' + b.dataset.kill + '?');
+    const kn = b.dataset.kname || ('PID ' + b.dataset.kill);
+    const yes = await uiConfirm('Завершить', app_kill_text(kn));
     if (!yes) return;
-    const res = await window.api.procsKill(s, +b.dataset.kill);
-    snack(res.ok ? 'Процесс остановлен' : ('Ошибка: ' + (res.message || '')));
-    procsRender();
+    b.disabled = true; b.textContent = '…';
+    const res = await window.api.procsKill(s, +b.dataset.kill, b.dataset.kname || '');
+    if (res.ok) {
+      // v2.7.2: строка уходит из списка СРАЗУ, фоново подтверждаем перечитыванием
+      const row = b.closest('.list-row'); if (row) row.remove();
+      snack('Остановлено: ' + kn);
+      procsRender();
+    } else {
+      b.disabled = false; b.textContent = 'Убить';
+      snack('Не удалось остановить: ' + (res.message || res.error || 'ошибка'));
+    }
   });
   // v2.7.0: иконки процессов из кэша (без скачивания APK); не найдено — остаётся робот/шестерёнка
   procIconsRendered.clear();
-  for (const x of items.slice(0, 120).filter(y => /^(com|org|net|ru)\./.test(y.name))) {
+  for (const x of items.slice(0, 120).filter(isApp)) {
     const id = 'pico-' + x.name.replace(/[^a-z0-9]/gi, '_') + '-' + x.pid;
     if (procIconsRendered.has(x.name)) continue;
     procIconsRendered.add(x.name);
@@ -2853,8 +3062,8 @@ window.api.onTask(async ev => {
     if (!$('#dlg-imgview').classList.contains('hidden')) $('#imgview-msg').textContent = msg;
     if (!$('#dlg-media').classList.contains('hidden') && !mp.isVideo) $('#media-now-sub').textContent = msg;
   } else if (ev.kind === 'apk-meta-progress') {
-    // v2.7.1: честный статус разбора APK из файлового менеджера (иконка/имя тянутся с телефона)
-    if (ev.stage === 'pull') snack('Изучаю приложение ' + ev.file + (ev.size ? ' (' + Math.round(ev.size / 1048576) + ' МБ)' : '') + ' — иконка появится после загрузки…', 6000);
+    // v2.7.2: уведомления «Изучаю приложение…» УБРАНЫ совсем — загрузка иконок идёт тихо
+    // в фоне, иконка/имя просто появляются в строке файла (жалоба: «засыпало уведомлениями»)
   } else if (ev.kind === 'open-apk') {
     // v2.6: файл открыт ассоциацией (двойной клик в Проводнике) или передан аргументом
     openApkMini(ev.path);
@@ -2911,6 +3120,24 @@ window.api.onTask(async ev => {
     $('#mirror-status').textContent = ev.text || '';
   }
 });
+
+/* ---------- v2.7.2: терминал и логcat на «Инструментах» по умолчанию СВЁРНУТЫ ---------- */
+(function initCollapsible() {
+  const KEY = 'tools.open';
+  let openSet = {};
+  try { openSet = JSON.parse(localStorage.getItem(KEY) || '{}') || {}; } catch (e) {}
+  $$('.collapse-card').forEach(card => {
+    card.classList.toggle('open', !!openSet[card.id]);
+    const head = card.querySelector('.collapse-head');
+    if (!head) return;
+    head.addEventListener('click', (e) => {
+      e.preventDefault(); e.stopPropagation();
+      card.classList.toggle('open');
+      openSet[card.id] = card.classList.contains('open');
+      try { localStorage.setItem(KEY, JSON.stringify(openSet)); } catch (err) {}
+    });
+  });
+})();
 
 /* ---------- навигация и старт ---------- */
 function goPage(name) {

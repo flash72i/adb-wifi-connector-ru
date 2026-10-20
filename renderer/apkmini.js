@@ -83,12 +83,60 @@ async function refreshDevices() {
       const label = (d.model || d.props && d.props.product || serial) + (serial.includes(':') ? '' : ' [USB]');
       return '<option value="' + esc(serial) + '">' + esc(label) + ' — ' + esc(serial) + '</option>';
     }).join('');
+    if (sel.selectedIndex < 0 || sel.selectedIndex >= devices.length) sel.selectedIndex = 0;
+  }
+  // v2.7.2: ЯВНЫЙ статус — сразу видно, подключено устройство или нет (раньше было непонятно:
+  // «то ли в списке есть устройство, то ли подключено, то ли нет»)
+  const st = $('#mini-devstatus'), tx = $('#mini-devtext');
+  if (st && tx) {
+    if (devices.length) {
+      const d = devices[0];
+      const net = String(d.serial).includes(':');
+      tx.textContent = 'Подключено: ' + (d.model || d.serial) + (net ? ' (' + d.serial + ')' : ' [USB]') + (devices.length > 1 ? ' · всего ' + devices.length : '');
+      st.classList.add('on');
+      st.querySelector('.dot').classList.remove('off');
+    } else {
+      tx.textContent = 'Нет подключённых устройств';
+      st.classList.remove('on');
+      st.querySelector('.dot').classList.add('off');
+    }
   }
   $('#mini-install').disabled = installing || !devices.length || !$('#mini-target').value;
 }
 
 $('#mini-refresh').onclick = refreshDevices;
 $('#mini-target').onchange = () => { $('#mini-install').disabled = installing || !$('#mini-target').value; };
+
+/* v2.7.2: автопроверка устройств, пока окно открыто — статус «Подключено» появляется сам */
+setInterval(() => { if (!document.hidden && !installing) refreshDevices().catch(() => {}); }, 3000);
+
+/* v2.7.2: поиск телефона в сети (mDNS + сканирование подсети) прямо из мини-окна */
+$('#mini-find').onclick = async () => {
+  const box = $('#mini-find-results');
+  box.innerHTML = '<div class="empty">Ищу телефоны в сети (mDNS + порты 5555 на подсети) — до минуты…</div>';
+  let found = [];
+  try { found = (await window.api.scanSubnet()) || []; } catch (e) {}
+  try {
+    const md = (await window.api.mdnsDiscover()) || [];
+    for (const m of md) {
+      if (!String(m.service || '').includes('connect')) continue;
+      if (!found.some(f => f.host === m.host && f.port === m.port)) found.push({ host: m.host, port: m.port, label: 'mDNS' });
+    }
+  } catch (e) {}
+  if (!found.length) {
+    box.innerHTML = '<div class="empty">Телефон в сети не найден. Откройте на телефоне «Беспроводная отладка» и введите IP:порт в строке ниже.</div>';
+    return;
+  }
+  box.innerHTML = found.map((f, i) => '<div class="list-row"><span class="mono grow2">' + esc(f.host + ':' + f.port) +
+    ' <span class="muted">· ' + esc(f.label || 'порт 5555') + '</span></span><button class="btn btn-tonal btn-sm" data-mc="' + i + '">Подключить</button></div>').join('');
+  box.querySelectorAll('[data-mc]').forEach(b => b.onclick = async () => {
+    const f = found[+b.dataset.mc];
+    snack('Подключаюсь к ' + f.host + ':' + f.port + '…');
+    const r = await window.api.adbConnect(f.host, +f.port);
+    snack(r.ok ? 'Подключено: ' + f.host + ':' + f.port : 'Не удалось: ' + ((r.message || r.error || '').slice(0, 140)));
+    if (r.ok) await refreshDevices();
+  });
+};
 
 /* подключение устройства прямо из мини-окна */
 $('#mini-connect').onclick = () => { const r = $('#mini-conn-row'); r.style.display = r.style.display === 'none' ? 'flex' : 'none'; };
@@ -144,7 +192,8 @@ window.api.onTask(async ev => {
       $('#mini-status').textContent = '✗ ' + (ev.message || 'Ошибка');
       $('#mini-progress').classList.add('hidden');
     }
-  } else if (ev.kind === 'refresh-devices') {
+  } else if (ev.kind === 'refresh-devices' || ev.kind === 'connected') {
+    // v2.7.2: устройство подключили (в т.ч. в основном окне) — статус обновится сам
     await refreshDevices();
   }
 });

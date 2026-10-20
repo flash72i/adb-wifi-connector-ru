@@ -1,7 +1,7 @@
 {
   "name": "adb-wifi-connector-ru",
   "productName": "ADB Wi-Fi Коннектор",
-  "version": "2.7.1",
+  "version": "2.7.2",
   "description": "Беспроводная отладка Android по Wi-Fi (RU)",
   "main": "main.js",
   "license": "MIT"

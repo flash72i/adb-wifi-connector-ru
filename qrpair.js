@@ -42,6 +42,7 @@ function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
  * Запустить QR-сессию. Возвращает {ok, qrText} синхронно, поиск идёт в фоне.
  * deps.sendStatus(stage, message, extra?) — статусы в renderer (task:event → qr-status)
  * deps.onConnected(host, port, model)     — вызывается при успешном подключении
+ * deps.hintHost                           — IP телефона (активное устройство/крайнее из истории)
  * deps.log(...a)                          — журнал main-процесса
  */
 function start(deps) {
@@ -50,7 +51,7 @@ function start(deps) {
   const service = genServiceName();
   const password = genPassword(10);
   const qrText = `WIFI:T:ADB;S:${service};P:${password};;`;
-  session = { service, password, qrText, cancelled: false, finished: false };
+  session = { service, password, qrText, cancelled: false, finished: false, hintHost: String(deps.hintHost || '') };
   run(session, deps).catch(e => {
     if (session && !session.finished) {
       session.finished = true;
@@ -83,34 +84,82 @@ async function run(s, deps) {
 
   sendStatus('listening', 'Ожидание сканирования… На телефоне: «Беспроводная отладка» → «Подключить устройство по QR-коду», наведите камеру на код и НЕ закрывайте экран сканера.');
 
-  // 1) ждём, пока телефон опубликует сервис сопряжения с нашим именем — тремя источниками
-  let target = null;
+  // v2.7.2: обнаружение телефона — ЧЕТЫРЕ ПАРАЛЛЕЛЬНЫХ источника, кто первый нашёл — тот и
+  // выигрывает (раньше источники опрашивались ПО ОЧЕРЕДИ в одном цикле: 1,2 с на свой mDNS
+  // ПЕРЕД каждой проверкой adb mdns — при задушенном multicast это давало минуты ожидания):
+  //   B) `adb mdns services` — самый быстрый (~0,3 с), свой стек adb в отдельном процессе;
+  //   A) собственный mDNS-клиент (обычный и эфемерный порт по очереди);
+  //   C) unicast-свип подсети (роутеры, режущие multicast);
+  //   D) ПРЯМОЕ сопряжение по портам: если знаем IP телефона — свипаем его порты и сразу
+  //      пробуем `adb pair` на каждом открытом. Работает ДАЖЕ если mDNS полностью не ходит —
+  //      именно это и даёт быстрое подключение на сетях с «резким» роутером.
   const t0 = Date.now();
-  let round = 0;
-  let lastHint = 0;
-  while (!s.cancelled && !target && Date.now() - t0 < LISTEN_TIMEOUT_MS) {
-    round++;
-    // источник A: собственный mDNS-клиент, чередуя обычный и эфемерный порт (фаервол режет 5353)
-    const ephemeral = round % 2 === 1;
-    const recs = await mdns.discover(1200, { ephemeral }).catch(() => []);
-    target = (recs || []).find(r => isOurPairing(r, s.service));
-    // источник B: собственный mDNS-стек adb (живёт в другом процессе, другие права/сокеты)
-    if (!target) {
+  let target = null;
+  let wake = () => {};
+  const foundP = new Promise(r => { wake = r; });
+  const setTarget = (t, src, alreadyPaired) => {
+    if (target || s.cancelled) return;
+    target = t;
+    target._paired = !!alreadyPaired;
+    log('found via ' + src);
+    wake();
+  };
+  const checkRecs = (recs, src) => {
+    if (target) return;
+    for (const r of (recs || [])) if (isOurPairing(r, s.service)) return setTarget(r, src);
+  };
+  const loops = [];
+  // B: adb mdns services — первым: быстрый и самый совместимый
+  loops.push((async () => {
+    while (!s.cancelled && !target && Date.now() - t0 < LISTEN_TIMEOUT_MS) {
       const am = await adb.mdnsServices().catch(() => ({ items: [] }));
-      target = ((am && am.items) || []).find(r => isOurPairing(r, s.service));
-      if (target) log('found via adb mdns services');
+      checkRecs((am && am.items) || [], 'adb mdns services');
+      if (!target) await sleep(700);
     }
-    // источник C: каждые 2 раунда — прямой unicast-опрос всех хостов подсети
-    if (!target && round % 2 === 0) {
+  })().catch(() => {}));
+  // A: собственный mDNS-клиент
+  loops.push((async () => {
+    let round = 0;
+    while (!s.cancelled && !target && Date.now() - t0 < LISTEN_TIMEOUT_MS) {
+      round++;
+      const recs = await mdns.discover(1200, { ephemeral: round % 2 === 1 }).catch(() => []);
+      checkRecs(recs, 'own mdns');
+      if (!target) await sleep(150);
+    }
+  })().catch(() => {}));
+  // C: unicast-свип подсети
+  loops.push((async () => {
+    while (!s.cancelled && !target && Date.now() - t0 < LISTEN_TIMEOUT_MS) {
       const uni = await mdns.discoverUnicast(1800, { ephemeral: true }).catch(() => []);
-      target = (uni || []).find(r => isOurPairing(r, s.service));
-      if (target) log('found via unicast sweep');
+      checkRecs(uni, 'unicast sweep');
+      if (!target) await sleep(600);
     }
-    if (!target && Date.now() - lastHint > 20000) {
-      lastHint = Date.now();
-      sendStatus('listening', 'Ищу телефон по сети (' + Math.round((Date.now() - t0) / 1000) + ' с)… Проверьте: телефон и ПК в одной Wi-Fi-сети, экран сканера на телефоне открыт. Если не находится — проверьте, что сеть Windows помечена «Частная».');
-    }
+  })().catch(() => {}));
+  // D: прямое сопряжение по портам известного IP (без mDNS вовсе)
+  if (s.hintHost) {
+    loops.push((async () => {
+      const triedPair = new Set();
+      while (!s.cancelled && !target && Date.now() - t0 < LISTEN_TIMEOUT_MS) {
+        const ports = await adb.portScanFast(s.hintHost).catch(() => []);
+        for (const p of (ports || []).slice(0, 6)) {
+          if (target || s.cancelled) break;
+          if (triedPair.has(p)) continue;
+          triedPair.add(p);
+          // пароль верен только для порта сопряжения; на прочих портах adb pair честно откажет
+          const pr = await adb.pair(s.hintHost, p, s.password).catch(() => ({ ok: false }));
+          if (pr && pr.ok) { setTarget({ host: s.hintHost, port: p }, 'direct port pair', true); break; }
+        }
+        if (!target) await sleep(1600);
+      }
+    })().catch(() => {}));
   }
+  const hintTimer = setInterval(() => {
+    if (!target && !s.cancelled && Date.now() - t0 > 15000) {
+      sendStatus('listening', 'Ищу телефон по сети (' + Math.round((Date.now() - t0) / 1000) + ' с)… Экран сканера на телефоне должен оставаться открытым.');
+    }
+  }, 5000);
+  await Promise.race([foundP, sleep(LISTEN_TIMEOUT_MS)]);
+  clearInterval(hintTimer);
   if (s.cancelled) return;
   if (!target) {
     s.finished = true;
@@ -118,21 +167,24 @@ async function run(s, deps) {
     return;
   }
 
-  // 2) сопряжение паролем из QR
-  sendStatus('found', `Телефон найден: ${target.host}:${target.port}. Сопряжение…`);
-  log('pairing', target.host + ':' + target.port);
-  const pr = await adb.pair(target.host, target.port, s.password);
-  if (s.cancelled) return;
-  if (!pr.ok) {
-    s.finished = true;
-    const msg = String(pr.error || pr.message || 'ошибка').split('\n')[0].slice(0, 200);
-    sendStatus('error', 'Сопряжение не удалось: ' + msg);
-    return;
+  // 2) сопряжение паролем из QR (если его уже сделал источник D — пропускаем)
+  if (!target._paired) {
+    sendStatus('found', `Телефон найден: ${target.host}:${target.port}. Сопряжение…`);
+    const pr = await adb.pair(target.host, target.port, s.password);
+    if (s.cancelled) return;
+    if (!pr.ok) {
+      s.finished = true;
+      const msg = String(pr.error || pr.message || 'ошибка').split('\n')[0].slice(0, 200);
+      sendStatus('error', 'Сопряжение не удалось: ' + msg);
+      return;
+    }
+  } else {
+    sendStatus('found', `Телефон найден: ${target.host}:${target.port}. Сопряжение уже выполнено.`);
   }
 
   // 3) подключение: adb мог сделать это сам (auto-connect), иначе ищем порт по mDNS/свипу
   sendStatus('paired', 'Сопряжение выполнено. Подключение…');
-  const serial = await connectPhase(s, target.host, log);
+  const serial = await connectPhase(s, target.host, target.port, log);
   if (s.cancelled) return;
   if (!serial) {
     s.finished = true;
@@ -148,20 +200,20 @@ async function run(s, deps) {
   sendStatus('connected', 'Подключено: ' + (model || serial), { host, port: parseInt(portStr, 10) || 5555, model });
 }
 
-// v2.7.0: фаза подключения ПОСЛЕ сопряжения полностью переписана — раньше здесь было
-// две беды: (1) полный свип 15 000 портов (~24 с) стартовал только ПОСЛЕ 30-секундного
-// бесплодного цикла mDNS-опросов, (2) каждый раунд делал sleep(1200) + медленные adb-вызовы.
-// Теперь: свип запускается ПЕРВЫМ ДЕЛОМ с ранним выходом (первый открытый порт находится
-// за ~1–2 с), параллельно опрашивается adb devices (автоподключение), найденные порты
-// пробуются подключением немедленно. Типичное время «Подключение…»: 3–8 секунд.
-async function connectPhase(s, host, log) {
+// v2.7.0: фаза подключения ПОСЛЕ сопряжения переписана: свип портов стартует ПЕРВЫМ ДЕЛОМ
+// с ранним выходом, параллельно опрашивается adb devices (автоподключение), найденные порты
+// пробуются немедленно.
+// v2.7.2: сразу после сопряжения пробуем СОСЕДНИЕ порты (порт отладки часто = порт сопряжения
+// ±1) — это даёт подключение за ~0,5 с, не дожидаясь свипа, и полл adb devices идёт с ними параллельно.
+async function connectPhase(s, host, pairPort, log) {
   const t0 = Date.now();
   let stopped = false;
+  let serial = null;
   // (1) быстрый свип портов — запускаем сразу, он и есть главный источник кандидатов
   const scanP = adb.portScanFast(host).catch(() => []);
   // (2) параллельно: adb мог уже сам подключить устройство после сопряжения
   const pollP = (async () => {
-    while (!stopped && !s.cancelled && Date.now() - t0 < CONNECT_TIMEOUT_MS) {
+    while (!stopped && !s.cancelled && !serial && Date.now() - t0 < CONNECT_TIMEOUT_MS) {
       const d = await adb.devices().catch(() => ({ ok: false, list: [] }));
       for (const dev of (d.list || [])) {
         if (dev.state === 'device' && dev.serial.startsWith(host + ':')) return dev.serial;
@@ -180,8 +232,16 @@ async function connectPhase(s, host, log) {
     } catch (e) {}
     return null;
   };
+  // (3) соседние порты — мгновенный кандидат
+  if (pairPort) {
+    await Promise.race([pollP.then(r => { if (r) serial = r; }), sleep(350)]);
+    if (!serial) for (const p of [pairPort + 1, pairPort - 1, pairPort + 2]) {
+      if (s.cancelled) return null;
+      serial = await tryPort(p);
+      if (serial) break;
+    }
+  }
   // ГОНКА источников: кто первый даст рабочий serial — тот и выигрывает
-  let serial = null;
   while (!s.cancelled && !serial && Date.now() - t0 < CONNECT_TIMEOUT_MS) {
     const winner = await Promise.race([
       pollP.then(r => (r ? { type: 'poll', serial: r } : null)),
