@@ -52,15 +52,30 @@ $('#input-ok').onclick = () => finishInput(true);
 $('#input-field').addEventListener('keydown', e => { if (e.key === 'Enter') finishInput(true); });
 
 // подтверждение вместо нативного confirm() — не выбивается из кастомного окна (A1)
+// v2.8.0: opts.checkbox — «Больше не спрашивать»: возвращает {ok, dontAsk} вместо boolean;
+// подтверждающие галочки запоминаются в localStorage — владелец больше не кликает по сто раз
 let confirmCb = null, confirmCancelCb = null;
-function uiConfirm(title, body) {
+function uiConfirm(title, body, opts) {
+  opts = opts || {};
   return new Promise(resolve => {
-    confirmCb = () => resolve(true);
-    confirmCancelCb = () => resolve(false);
+    confirmCb = () => resolve({ ok: true, dontAsk: !!(opts.checkbox && $('#confirm-dontask') && $('#confirm-dontask').checked) });
+    confirmCancelCb = () => resolve({ ok: false, dontAsk: false });
     $('#confirm-title').textContent = title;
     $('#confirm-body').textContent = body || '';
+    const cb = $('#confirm-dontask');
+    if (cb) {
+      if (opts.checkbox) { cb.parentElement.classList.remove('hidden'); cb.checked = false; }
+      else cb.parentElement.classList.add('hidden');
+    }
     openDlg('dlg-confirm');
   });
+}
+async function confirmOnce(key, title, body) {
+  // v2.8.0: подтверждение «один раз навсегда» для конкретного действия (ключ в localStorage)
+  try { if (localStorage.getItem(key) === '1') return { ok: true, dontAsk: true }; } catch (e) {}
+  const r = await uiConfirm(title, body, { checkbox: 'Больше не спрашивать' });
+  if (r.ok && r.dontAsk) { try { localStorage.setItem(key, '1'); } catch (e) {} }
+  return r;
 }
 
 // флаг активной QR-сессии: нужен обработчику data-close ниже и блоку QR-подключения
@@ -613,7 +628,10 @@ async function pairFindAndConnect(knownHost) {
 
 $('#btn-pair-mdns').onclick = () => pairFindAndConnect($('#pair-ip').value.trim() || null);
 
-/* ---------- QR-подключение: ПК показывает код, телефон сканирует камерой (R2) ---------- */
+/* ---------- QR-подключение: ПК показывает код, телефон сканирует камерой (R2) ----------
+   v2.8.0: QR показывается СРАЗУ на карточке сопряжения (панель #qr-inline ~156×149 px),
+   без отдельного диалога и без повторных нажатий; шаги «поиск → сопряжение → подключено»
+   видны мгновенно строкой под кодом. */
 function qrSetStatus(text, cls) {
   const el = $('#qr-pc-status');
   el.textContent = text;
@@ -624,25 +642,26 @@ function qrLog(text) {
   const box = $('#qr-pc-log');
   if (!box) return;
   const div = document.createElement('div');
-  div.textContent = new Date().toLocaleTimeString('ru-RU') + ' — ' + text;
+  div.textContent = text;
   box.appendChild(div);
-  while (box.children.length > 5) box.removeChild(box.firstChild);
+  while (box.children.length > 4) box.removeChild(box.firstChild);
   box.scrollTop = box.scrollHeight;
 }
 async function qrBegin() {
-  $('#btn-qr-retry').classList.add('hidden');
-  $('#qr-pc-log').innerHTML = '';
+  const panel = $('#qr-inline');
+  if (panel) panel.classList.remove('hidden');
   qrSetStatus('Готовим QR-код…', '');
   const r = await window.api.qrStart();
-  if (!r.ok) { qrSetStatus(r.error || 'Не удалось запустить сессию', 'err'); $('#btn-qr-retry').classList.remove('hidden'); return; }
+  if (!r.ok) { qrSetStatus(r.error || 'Не удалось запустить сессию', 'err'); return; }
   qrActive = true;
-  QRCodeLib.toCanvas($('#qr-pc-canvas'), r.qrText, { width: 260, margin: 1, color: { dark: '#000000', light: '#ffffff' } }, err => {
+  QRCodeLib.toCanvas($('#qr-pc-canvas'), r.qrText, { width: 156, height: 149, margin: 0, color: { dark: '#000000', light: '#ffffff' } }, err => {
     if (err) qrSetStatus('Ошибка отрисовки QR: ' + err.message, 'err');
-    else qrSetStatus('Ожидание сканирования… Наведите камеру телефона на код, экран сканера не закрывайте.', '');
+    else qrSetStatus('Сканируйте камерой телефона: «Беспроводная отладка» → «Подключить по QR-коду»', '');
   });
 }
-$('#btn-qr-show').onclick = () => { openDlg('dlg-qrpc'); qrBegin(); };
-$('#btn-qr-retry').onclick = async () => { await window.api.qrCancel(); qrBegin(); };
+function qrHidePanel() { qrActive = false; const p = $('#qr-inline'); if (p) p.classList.add('hidden'); }
+$('#btn-qr-show').onclick = () => { if (qrActive) { window.api.qrCancel(); } qrBegin(); };
+$('#btn-qr-cancel-inline').onclick = () => { window.api.qrCancel(); qrHidePanel(); };
 
 /* ---------- инструменты: состояние и общие ---------- */
 function currentSerial() { return activeSerial; }
@@ -1315,6 +1334,19 @@ function renderApkTargets() {
 }
 function apkQRender() {
   const box = $('#apk2-list');
+  // v2.8.0: зона перетаскивания СЖИМАЕТСЯ, когда в списке уже есть файлы — раньше она
+  // оставалась «в полэкрана» и один файл с большой иконкой выглядел как сломанная вёрстка
+  const dz = $('#apk2-drop');
+  if (dz) {
+    dz.classList.toggle('compact', apkQueue.length > 0);
+    dz.innerHTML = apkQueue.length
+      ? 'Можно добавить ещё: перетащите файлы сюда или <button class="btn btn-text btn-sm" id="btn-apk2-pick2">выберите…</button>'
+      : 'Перетащите APK / XAPK / APKS / APKM / OBB сюда<br><span class="muted small">или</span><br><button class="btn btn-tonal" id="btn-apk2-pick" style="margin-top:8px">Выбрать файлы…</button>';
+    const pk2 = document.getElementById('btn-apk2-pick2');
+    if (pk2) pk2.onclick = apkPickFiles;
+    const pk1 = document.getElementById('btn-apk2-pick');
+    if (pk1) pk1.onclick = apkPickFiles;   // v2.8.0: кнопка пересоздаётся вместе с dropzone — перепривязываем каждый раз
+  }
   box.innerHTML = apkQueue.map((f, i) => {
     const st = f.status === 'ok' ? '<span class="st-chip st-active apkq-status">✓ установлено</span>'
       : f.status === 'fail' ? '<span class="st-chip st-off apkq-status st-fail" data-tip="' + esc(f.msg || '') + '">✗ ошибка</span>'
@@ -1357,10 +1389,10 @@ async function apkAddFiles(paths) {
   if (added) { snd.play('drop'); snack('Добавлено файлов: ' + added); }
   else snack('Подходящих файлов нет (нужны .apk/.apks/.xapk/.apkm/.obb/.aab)');
 }
-$('#btn-apk2-pick').onclick = async () => {
+async function apkPickFiles() {
   const files = await window.api.pickFile({ properties: ['openFile', 'multiSelections'], filters: [{ name: 'Android пакеты', extensions: ['apk', 'aab', 'apks', 'xapk', 'apkm', 'obb', 'apup'] }] });
   if (files && files.length) apkAddFiles(files);
-};
+}
 const apk2Drop = $('#apk2-drop');
 apk2Drop.ondragover = e => { e.preventDefault(); apk2Drop.classList.add('over'); };
 apk2Drop.ondragleave = () => apk2Drop.classList.remove('over');
@@ -1380,7 +1412,7 @@ $('#btn-apk2-installall').onclick = async () => {
   if (!serial) return snack('Сначала подключите устройство и выберите его в списке');
   if (!apkQueue.length) return;
   const yes = await uiConfirm('Установка ' + apkQueue.length + ' файл(ов)', 'Установить на «' + nameOf(serial) + '»? Очередь пойдёт по порядку, по каждому файлу будет видно статус.');
-  if (!yes) return;
+  if (!yes || !yes.ok) return;
   apkInstalling = true;
   apkQueue.forEach(f => { f.status = 'wait'; f.msg = ''; });
   $('#btn-apk2-cancel').classList.remove('hidden');
@@ -1476,6 +1508,11 @@ let fsDir = '/sdcard';
 let fsHist = [];            // история переходов для кнопки «Назад» (F5)
 let fsItems = [];           // кэш последнего списка — для просмотрщика/плеера/флешки
 let fsFlash = null;         // v2.6: путь смонтированной OTG-флешки (/storage/XXXX-XXXX) или null
+let fsCatKind = null;       // v2.8.0: категория «со всех папок» (photo/music/video/docs) или null
+let fsCatItems = [];        // результаты категории (полные пути)
+// v2.8.0: буфер обмена проводника — Копировать/Вырезать → Вставить в любую папку
+// (в т.ч. с памяти телефона на флешку и обратно)
+let fsClip = { paths: [], cut: false };
 const FS_QUICK = [
   { label: 'Внутренняя память', dir: '/sdcard' },
   { label: 'Download', dir: '/sdcard/Download' },
@@ -1501,52 +1538,95 @@ function fsNormalize(p) {
 }
 function renderFsQuick() {
   const box = $('#fs-quick');
-  box.innerHTML = FS_QUICK.map(q => `<button class="chip" data-qdir="${esc(q.dir)}">${esc(q.label)}</button>`).join('');
+  const catChips = [
+    { kind: 'photo', label: 'Все фото', ico: '&#128444;' },
+    { kind: 'music', label: 'Вся музыка', ico: '&#9835;' },
+    { kind: 'video', label: 'Всё видео', ico: '&#127909;' },
+    { kind: 'docs', label: 'Документы', ico: '&#128196;' }
+  ];
+  box.innerHTML = FS_QUICK.map(q => `<button class="chip${fsCatKind ? '' : (fsDir === q.dir ? ' view-chip active' : '')}" data-qdir="${esc(q.dir)}">${esc(q.label)}</button>`).join('') +
+    catChips.map(c => `<button class="chip${fsCatKind === c.kind ? ' view-chip active' : ''}" data-qcat="${c.kind}" data-tip="Показать ${esc(c.label.toLowerCase())} СО ВСЕХ папок телефона">${c.ico} ${esc(c.label)}</button>`).join('');
   box.querySelectorAll('[data-qdir]').forEach(b => b.onclick = () => fsNavigate(b.dataset.qdir));
+  box.querySelectorAll('[data-qcat]').forEach(b => b.onclick = () => fsNavigate('cat:' + b.dataset.qcat));
 }
 // v2.7.1: ОДНА кнопка «Вид» с выпадающим меню как в Проводнике Windows 11 — пункты + ползунок
 // размера значков. ВАЖНО: в v2.7.0 здесь был crash-баг всего приложения: IIFE syncFsViewChips
 // читала let fsView ДО его объявления (TDZ ReferenceError) — app.js умирал на этой строке,
 // и ВСЁ, что объявлено ниже, оставалось неинициализированным: не работали файлы, приложения,
 // ассоциации, плеер, половина кнопок. Теперь fsView объявлен ЗДЕСЬ, выше использования.
-const VIEW_ORDER = ['list', 'icons', 'xl'];
-const VIEW_NAMES = { list: 'Список', icons: 'Значки', xl: 'Огромные' };
+// v2.8.0: ползунок ПЛАВНЫЙ, как в Проводнике Windows: 0–34 — список, 35–67 — значки
+// (ячейка растёт 76→130 px), 68–100 — огромные (130→250 px). Останавливаться можно на ЛЮБОЙ
+// позиции — размер ячейки меняется непрерывно, а не тремя ступенями.
 let fsView = 'list';
-try { fsView = localStorage.getItem('fs.view') || 'list'; } catch (e) {}
-if (!VIEW_ORDER.includes(fsView)) fsView = 'list';
+let fsSlider = 0;             // 0..100 — позиция ползунка
+try { fsSlider = Math.max(0, Math.min(100, parseInt(localStorage.getItem('fs.slider') || '0', 10) || 0)); } catch (e) {}
+fsView = fsSliderViewOf(fsSlider);
+function fsSliderViewOf(v) { return v <= 34 ? 'list' : (v <= 67 ? 'icons' : 'xl'); }
+function fsCellPxOf(v) {
+  if (v <= 34) return 0;
+  if (v <= 67) return Math.round(76 + (v - 35) / 32 * 54);   // 76..130
+  return Math.round(130 + (v - 67) / 33 * 120);              // 130..250
+}
+const VIEW_NAMES = { list: 'Список', icons: 'Значки', xl: 'Огромные' };
 function syncFsViewUI() {
+  fsView = fsSliderViewOf(fsSlider);
   const name = $('#fs-view-name'); if (name) name.textContent = VIEW_NAMES[fsView];
   $$('#fs-view-menu .view-item').forEach(x => x.classList.toggle('active', x.dataset.view === fsView));
-  const r = $('#fs-view-range'); if (r) r.value = String(VIEW_ORDER.indexOf(fsView));
+  const r = $('#fs-view-range'); if (r) r.value = String(fsSlider);
 }
-function setFsView(v) {
-  fsView = VIEW_ORDER.includes(v) ? v : 'list';
-  try { localStorage.setItem('fs.view', fsView); } catch (e) {}
+function setFsSlider(v) {
+  fsSlider = Math.max(0, Math.min(100, v | 0));
+  try { localStorage.setItem('fs.slider', String(fsSlider)); } catch (e) {}
   syncFsViewUI();
   fsRender();
 }
+setFsViewAnchors();
+function setFsViewAnchors() {
+  // пункты меню = якоря ползунка: Список=0, Значки=50, Огромные=100
+  $$('#fs-view-menu .view-item').forEach(c => {
+    c.onclick = () => { setFsSlider(c.dataset.view === 'list' ? 0 : c.dataset.view === 'icons' ? 50 : 100); $('#fs-view-menu').classList.add('hidden'); };
+  });
+}
 syncFsViewUI();
 $('#btn-fs-view').onclick = (e) => { e.stopPropagation(); $('#fs-view-menu').classList.toggle('hidden'); };
-$$('#fs-view-menu .view-item').forEach(c => c.onclick = () => { setFsView(c.dataset.view); $('#fs-view-menu').classList.add('hidden'); });
 (function viewSlider() {
   const r = $('#fs-view-range');
   let deb = null;
-  r.addEventListener('input', () => { clearTimeout(deb); deb = setTimeout(() => setFsView(VIEW_ORDER[+r.value]), 130); });
+  r.addEventListener('input', () => { clearTimeout(deb); deb = setTimeout(() => setFsSlider(+r.value), 60); });
 })();
 document.addEventListener('click', (e) => { const m = $('#fs-view-menu'); if (m && !e.target.closest('#fs-views')) m.classList.add('hidden'); });
 
 // навигация С историей: кнопка «Назад» возвращает на предыдущую папку (F5)
+// v2.8.0: 'cat:photo|music|video|docs' — виртуальная категория со ВСЕХ папок телефона
+const CAT_TITLES = { photo: 'Все фото устройства', music: 'Вся музыка устройства', video: 'Всё видео устройства', docs: 'Все документы устройства' };
 function fsNavigate(newDir, { back } = {}) {
-  const target = back ? null : fsNormalize(newDir || '/sdcard');
+  if (newDir && String(newDir).startsWith('cat:')) {
+    const kind = String(newDir).slice(4);
+    if (!CAT_TITLES[kind]) return;
+    if (fsCatKind !== kind || fsDir) { if (fsDir || fsCatKind) fsHist.push(fsCatKind ? 'cat:' + fsCatKind : fsDir); }
+    fsCatKind = kind;
+    $('#btn-fs-back').disabled = !fsHist.length;
+    renderFsQuick();
+    fsRender();
+    return;
+  }
   if (back) {
     const prev = fsHist.pop();
-    fsDir = fsNormalize(prev || '/sdcard');
+    if (prev && String(prev).startsWith('cat:')) {
+      fsCatKind = prev.slice(4); fsDir = '/sdcard';
+    } else {
+      fsCatKind = null;
+      fsDir = fsNormalize(prev || '/sdcard');
+    }
   } else {
-    if (target !== fsDir) fsHist.push(fsDir);
+    const target = fsNormalize(newDir || '/sdcard');
+    if (target !== fsDir || fsCatKind) fsHist.push(fsCatKind ? 'cat:' + fsCatKind : fsDir);
     if (fsHist.length > 60) fsHist.shift();
+    fsCatKind = null;
     fsDir = target;
   }
   $('#btn-fs-back').disabled = !fsHist.length;
+  renderFsQuick();
   fsRender();
 }
 
@@ -1567,6 +1647,8 @@ const PDF_RE = /\.pdf$/i;
 const HTML_RE = /\.(html?|xhtml)$/i;
 const ARC_RE = /\.(zip|jar|tar|tar\.gz|tgz|tar\.bz2|tbz2|tar\.xz|rar|7z)$/i;
 const APK_RE = /\.(apk|apks|xapk|apkm)$/i;
+const DOCX_RE = /\.docx$/i;   // v2.8.0: просмотр DOCX внутри программы
+const VCF_RE = /\.vcf$/i;     // v2.8.0: просмотр контактов vCard
 // v2.7.1: fsView объявлен и инициализирован ВЫШЕ (блок кнопки «Вид») — здесь больше не дублируется
 const thumbCache = new Map();     // путь → dataURL (миниатюры фото в режиме значков)
 const thumbFail = new Set();
@@ -1634,6 +1716,55 @@ async function fsRender() {
   const s = currentSerial();
   const box = $('#fs-list');
   const empty = $('#fs-empty');
+  // v2.8.0: РЕЖИМ КАТЕГОРИИ — «Все фото / Вся музыка / Всё видео / Документы» со ВСЕХ папок
+  if (fsCatKind) {
+    $('#fs-path').value = CAT_TITLES[fsCatKind] || fsCatKind;
+    $('#fs-crumb').textContent = CAT_TITLES[fsCatKind] + ' (виртуальная папка — файлы лежат по своим местам)';
+    if (!s) { box.innerHTML = ''; box.classList.add('hidden'); empty.classList.remove('hidden'); return; }
+    if (seq !== fsSeq) return;
+    empty.classList.add('hidden');
+    box.classList.remove('hidden');
+    box.classList.remove('fs-grid', 'fs-xl');
+    box.innerHTML = '<div class="empty">Ищу файлы по всему телефону… (до 15 секунд)</div>';
+    const r = await window.api.fsSearch(s, fsCatKind, ['/sdcard']).catch(() => null);
+    if (seq !== fsSeq) return;
+    fsCatItems = (r && r.items) || [];
+    fsItems = fsCatItems;
+    const q2 = ($('#fs-filter').value || '').toLowerCase();
+    let items2 = fsCatItems;
+    if (q2) items2 = items2.filter(it => it.name.toLowerCase().includes(q2));
+    if (!items2.length) {
+      box.innerHTML = '<div class="empty">Файлов этой категории не найдено на внутренней памяти</div>';
+      return;
+    }
+    // сортировка по имени; клик открывает просмотрщик по ПОЛНОМУ пути
+    items2 = items2.slice().sort((a, b) => a.name.localeCompare(b.name, 'ru'));
+    box.innerHTML = items2.map((it, i) => `<div class="list-row fs-row" data-fs-i="${i}">
+      <span class="fs-ico-wrap"><img class="fs-ico" src="${window.FSICONS.iconFor(it.name, false).src}" alt=""></span>
+      <span class="mono grow2 fs-name" data-fscat="${esc(it.path)}" style="cursor:pointer" data-tip="${esc(it.path)}">${esc(it.name)}</span>
+      <span class="muted small" style="max-width:34%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(it.path.replace(/^\/sdcard\/?/, ''))}</span>
+      <button class="btn btn-text btn-sm" data-fsgetp="${esc(it.path)}" data-tip="Скачать файл с телефона">Скачать</button>
+      <button class="btn btn-text btn-sm" data-fspropp="${esc(it.path)}" data-isdir="0" data-tip="Свойства">Свойства</button>
+    </div>`).join('');
+    box.querySelectorAll('[data-fscat]').forEach(el => el.onclick = () => {
+      const p = el.dataset.fscat; const nm = p.split('/').pop();
+      const fake = { name: nm, dir: false, path: p };
+      if (IMG_RE.test(nm)) openImgViewer(p);
+      else if (VID_RE.test(nm) || AUD_RE.test(nm)) openMediaPlayer(p);
+      else openTextViewer(p);
+      void fake;
+    });
+    box.querySelectorAll('[data-fsgetp]').forEach(b => b.onclick = async () => {
+      snack('Скачиваю ' + b.dataset.fsgetp.split('/').pop() + '…');
+      const res = await window.api.fsPull(s, b.dataset.fsgetp);
+      if (res.ok) snack('Сохранено: ' + res.file);
+    });
+    box.querySelectorAll('[data-fspropp]').forEach(b => b.onclick = () => {
+      const p = b.dataset.fspropp; const nm = p.split('/').pop();
+      openFsProps({ name: nm, dir: false, path: p });
+    });
+    return;
+  }
   $('#fs-path').value = fsDir;
   $('#fs-crumb').textContent = fsDir;
   if (!s) {
@@ -1694,17 +1825,23 @@ async function fsRender() {
       const res = await window.api.fsPull(s, full(b.dataset.fsget));
       if (res.ok) snack('Сохранено: ' + res.file);
     });
-    const doTransfer = async (name, mv) => {
+    const doTransfer = async (name, mv, dstDirOverride) => {
       const src = full(name);
-      const dstDir = onFlash ? '/sdcard/Download' : (() => {
+      const dstDir = dstDirOverride || (onFlash ? '/sdcard/Download' : (() => {
         const rel = fsDir === fsFlash ? '' : fsDir.slice(fsFlash.length).replace(/^\/+/, '');
         return fsFlash + (rel ? '/' + rel : '');
-      })();
+      })());
       const verb = mv ? 'Перемещаю' : 'Копирую';
       snack(verb + ' ' + name + ' → ' + dstDir + '…');
       await window.api.fsCmd(s, ['mkdir', '-p', dstDir]);
-      const r2 = await window.api.fsCmd(s, [mv ? 'mv' : 'cp', '-r', src, dstDir]);
-      if (r2.ok || /exists|such file/i.test(r2.stdout || '')) snack((mv ? 'Перемещено: ' : 'Скопировано: ') + name + ' → ' + dstDir);
+      // v2.8.0: mv между РАЗНЫМИ томами (память ⟷ флешка) даёт EXDEV — тогда копируем и удаляем источник
+      let r2 = await window.api.fsCmd(s, [mv ? 'mv' : 'cp', '-rf', src, dstDir + '/']);
+      if (!r2.ok && mv) {
+        const rc = await window.api.fsCmd(s, ['cp', '-rf', src, dstDir + '/']);
+        if (rc.ok) { await window.api.fsCmd(s, ['rm', '-rf', src]); r2 = { ok: true }; }
+        else r2 = rc;
+      }
+      if (r2.ok) snack((mv ? 'Перемещено: ' : 'Скопировано: ') + name + ' → ' + dstDir);
       else snack('Не удалось: ' + ((r2.stderr || r2.stdout || 'ошибка').slice(0, 120)));
       fsRender();
     };
@@ -1712,10 +1849,26 @@ async function fsRender() {
     root.querySelectorAll('[data-fs2flashmv]').forEach(b => b.onclick = (e) => { e.stopPropagation(); doTransfer(b.dataset.fs2flashmv, true); });
     root.querySelectorAll('[data-fs2phone]').forEach(b => b.onclick = (e) => { e.stopPropagation(); doTransfer(b.dataset.fs2phone, false); });
     root.querySelectorAll('[data-fs2phonemv]').forEach(b => b.onclick = (e) => { e.stopPropagation(); doTransfer(b.dataset.fs2phonemv, true); });
+    // v2.8.0: ПРАВАЯ КНОПКА — контекстное меню (Открыть/Копировать/Вырезать/Переименовать/
+    // Скачать/В архив/Свойства/Удалить) для файлов И папок
+    root.querySelectorAll('.fs-row[data-fs-i], .fs-cell[data-fs-i]').forEach(rowEl => {
+      rowEl.oncontextmenu = (e) => {
+        const it = byIdx(+(rowEl.dataset.fsI));
+        if (!it) return;
+        e.preventDefault(); e.stopPropagation();
+        openFsContextMenu(e.clientX, e.clientY, it, {
+          path: it.path || full(it.name),
+          open: () => openItem(it),
+          props: () => openFsProps(it),
+          download: it.dir ? null : () => window.api.fsPull(s, it.path || full(it.name)).then(res => { if (res.ok) snack('Сохранено: ' + res.file); }),
+          refresh: fsRender
+        });
+      };
+    });
     root.querySelectorAll('[data-fsdel]').forEach(b => b.onclick = async (e) => {
       e.stopPropagation();
       const yes = await uiConfirm('Удаление', 'Удалить ' + b.dataset.fsdel + ' с устройства? (папки — с содержимым)');
-      if (!yes) return;
+      if (!yes || !yes.ok) return;
       await window.api.fsCmd(s, ['rm', '-rf', full(b.dataset.fsdel)]);
       fsRender(); snack('Удалено');
     });
@@ -1729,7 +1882,7 @@ async function fsRender() {
       const isApk = !it.dir && APK_RE.test(it.name);
       const media = !it.dir && (IMG_RE.test(it.name) || VID_RE.test(it.name) || AUD_RE.test(it.name));
       if (isApk) apkJobs.push({ path: full(it.name), name: it.name, id: 'fsapk-' + i });
-      return `<div class="list-row fs-row">
+      return `<div class="list-row fs-row" data-fs-i="${i}">
       <span class="fs-ico-wrap"><img class="fs-ico" src="${ic.src}" alt="" data-fsopen-i="${i}" id="fsapk-${i}" data-path="${esc(full(it.name))}">${fsBadgeHtml(isApk)}</span>
       <span class="mono grow2 fs-name" data-fsopen="${esc(it.name)}" data-isdir="${it.dir ? 1 : 0}" data-fs-i="${i}" style="cursor:pointer" id="fsapk-${i}-name" data-path="${esc(full(it.name))}" data-tip="${it.dir ? 'Открыть папку' : (media ? 'Открыть в просмотрщике/плеере' : 'Двойной клик — свойства')}">${esc(it.name)}</span>
       <span class="muted fs-size">${it.dir ? '' : fmtBytes(it.size)}</span>
@@ -1742,23 +1895,27 @@ async function fsRender() {
     }).join('') || '<div class="empty">Папка пуста</div>';
   } else {
     // v2.7.0: значки / огромные значки — сетка как в Проводнике
+    // v2.8.0: размер ячейки ПЛАВНЫЙ (ползунок 35–100 → 76..250 px), как в Windows
+    const cellPx = fsCellPxOf(fsSlider) || 110;
     const xl = fsView === 'xl';
+    const bigEnoughForThumbs = cellPx >= 120;
     box.classList.add('fs-grid'); box.classList.toggle('fs-xl', xl);
+    box.style.setProperty('--fs-cell', cellPx + 'px');
     box.innerHTML = items.map((it, i) => {
       const ic = window.FSICONS.iconFor(it.name, it.dir);
       const isApk = !it.dir && APK_RE.test(it.name);
       const isImg = !it.dir && IMG_RE.test(it.name);
       const isVid = !it.dir && VID_RE.test(it.name);
-      const id = xl ? ('fscell-' + i) : null;
-      if (isImg && xl && it.size < 25 * 1024 * 1024) thumbJobs.push({ path: full(it.name), el: null, id: 'fscell-' + i });
-      if (isApk) apkJobs.push({ path: full(it.name), name: it.name, id: xl ? 'fscell-' + i : 'fscell-s-' + i });
-      return `<div class="fs-cell" data-fsopen="${esc(it.name)}" data-isdir="${it.dir ? 1 : 0}" data-fs-i="${i}" data-tip="${it.dir ? 'Открыть папку' : 'Клик — открыть, кнопки ниже — действия'}">
-      ${isImg && xl
-        ? '<img class="fs-cell-ico" id="fscell-' + i + '" src="' + ic.src + '" alt="" data-path="' + esc(full(it.name)) + '">'
-        : '<span style="position:relative;display:inline-block"><img class="fs-cell-ico" id="' + (xl ? 'fscell-' + i : 'fscell-s-' + i) + '" src="' + ic.src + '" alt="" data-path="' + esc(full(it.name)) + '">' + fsBadgeHtml(isApk) + '</span>'}
-      <span class="fs-cell-name" id="${(xl ? 'fscell-' : 'fscell-s-') + i}-name" data-path="${esc(full(it.name))}">${esc(it.name)}</span>
+      const id = bigEnoughForThumbs ? ('fscell-' + i) : ('fscell-s-' + i);
+      if (isImg && bigEnoughForThumbs && it.size < 25 * 1024 * 1024) thumbJobs.push({ path: full(it.name), el: null, id });
+      if (isApk) apkJobs.push({ path: full(it.name), name: it.name, id });
+      return `<div class="fs-cell" data-fsopen="${esc(it.name)}" data-isdir="${it.dir ? 1 : 0}" data-fs-i="${i}" data-tip="${it.dir ? 'Открыть папку (правая кнопка — меню)' : 'Клик — открыть, правая кнопка — меню'}">
+      ${isImg && bigEnoughForThumbs
+        ? '<img class="fs-cell-ico" id="' + id + '" src="' + ic.src + '" alt="" data-path="' + esc(full(it.name)) + '">'
+        : '<span style="position:relative;display:inline-block"><img class="fs-cell-ico" id="' + id + '" src="' + ic.src + '" alt="" data-path="' + esc(full(it.name)) + '">' + fsBadgeHtml(isApk) + '</span>'}
+      <span class="fs-cell-name" id="${id}-name" data-path="${esc(full(it.name))}">${esc(it.name)}</span>
       <span class="fs-cell-sub">${it.dir ? 'папка' : fmtBytes(it.size) + (isVid ? ' · видео' : isApk ? ' · приложение' : '')}</span>
-      <span class="fs-cell-actions" data-fs-i="${i}">
+      <span class="fs-cell-actions">
         <button class="btn btn-text btn-sm" data-fsprop="${esc(it.name)}" data-isdir="${it.dir ? 1 : 0}" data-tip="Свойства">ℹ</button>
         ${it.dir ? '' : '<button class="btn btn-text btn-sm" data-fsget="' + esc(it.name) + '" data-tip="Скачать на компьютер">⭳</button>'}
         ${it.dir ? '' : '<button class="btn btn-text btn-sm" data-fsdel="' + esc(it.name) + '" data-tip="Удалить">✕</button>'}
@@ -1776,12 +1933,383 @@ async function fsRender() {
   }
 }
 
+/* ================= v2.8.0: КОНТЕКСТНОЕ МЕНЮ (правая кнопка) =================
+   Для файлов и папок: Открыть · Скачать · Копировать · Вырезать · Переименовать ·
+   В архив ZIP · Открыть архив (для архивов) · Свойства · Удалить. Закрытие — клик мимо/Esc. */
+function closeFsCtx() { const m = $('#fs-ctx'); if (m) { m.classList.add('hidden'); m.innerHTML = ''; } }
+document.addEventListener('click', closeFsCtx);
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeFsCtx(); });
+window.addEventListener('blur', closeFsCtx);
+function openFsContextMenu(x, y, it, act) {
+  const m = $('#fs-ctx');
+  const items = [];
+  const isArc = !it.dir && ARC_RE.test(it.name);
+  const isApk = !it.dir && APK_RE.test(it.name);
+  const p = act.path;
+  items.push({ t: it.dir ? '&#128449; Открыть папку' : '&#128196; Открыть', fn: act.open });
+  if (isArc) items.push({ t: '&#128230; Открыть архив (не распаковывая)', fn: () => openArcViewer(p, it.name) });
+  if (!it.dir && act.download) items.push({ t: '&#11015; Скачать на компьютер', fn: act.download });
+  items.push({ sep: true });
+  items.push({ t: '&#128203; Копировать', fn: () => { fsClip = { paths: [p], cut: false }; showFsClipbar(); snack('Скопировано в буфер: ' + it.name); } });
+  items.push({ t: '&#9986; Вырезать', fn: () => { fsClip = { paths: [p], cut: true }; showFsClipbar(); snack('Вырезано: ' + it.name); } });
+  items.push({ t: '&#128193; Переместить в…', fn: () => openFsMoveDialog([p], true, it.name) });
+  if (!it.dir) items.push({ t: '&#128193; Копировать в…', fn: () => openFsMoveDialog([p], false, it.name) });
+  items.push({ t: '&#9998; Переименовать', fn: () => fsRename(p, it.name) });
+  items.push({ sep: true });
+  items.push({ t: '&#128230; Добавить в архив ZIP', fn: () => fsZipItems([p], it.name) });
+  items.push({ t: '&#9432; Свойства', fn: act.props });
+  items.push({ sep: true });
+  items.push({ t: '&#10060; Удалить', danger: true, fn: async () => {
+    const yes = await uiConfirm('Удаление', 'Удалить ' + it.name + (it.dir ? ' (папка — с содержимым)' : '') + ' с устройства?');
+    if (!yes || !yes.ok) return;
+    await window.api.fsCmd(currentSerial(), ['rm', '-rf', p]);
+    snack('Удалено: ' + it.name);
+    (act.refresh || fsRender)();
+  } });
+  m.innerHTML = items.map((x, i) => x.sep ? '<div class="fs-ctx-sep"></div>' :
+    `<button class="fs-ctx-item${x.danger ? ' danger' : ''}" data-i="${i}">${x.t}</button>`).join('');
+  m.querySelectorAll('.fs-ctx-item').forEach(b => b.onclick = (e) => {
+    e.stopPropagation();
+    closeFsCtx();
+    const fn = items[+b.dataset.i].fn;
+    if (fn) fn();
+  });
+  m.classList.remove('hidden');
+  const w = m.offsetWidth || 240, h = m.offsetHeight || 200;
+  m.style.left = Math.min(x, window.innerWidth - w - 8) + 'px';
+  m.style.top = Math.min(y, window.innerHeight - h - 8) + 'px';
+  m.style.zIndex = '500';
+}
+/* ---------- буфер обмена проводника: панель + вставка (в любую папку, любой том) ---------- */
+function showFsClipbar() {
+  const bar = $('#fs-clipbar');
+  if (!fsClip.paths.length) { bar.classList.add('hidden'); return; }
+  bar.classList.remove('hidden');
+  const names = fsClip.paths.map(p => p.split('/').pop());
+  const shown = names.length > 3 ? names.slice(0, 3).join(', ') + ' + ещё ' + (names.length - 3) : names.join(', ');
+  $('#fs-cliptext').textContent = (fsClip.cut ? 'Вырезано: ' : 'Скопировано: ') + shown + ' → вставьте в нужной папке';
+}
+async function fsPasteInto(dstDir) {
+  const s = currentSerial(); if (!s || !fsClip.paths.length) return;
+  snack((fsClip.cut ? 'Перемещаю ' : 'Копирую ') + fsClip.paths.length + ' объект(ов) → ' + dstDir + '…');
+  await window.api.fsCmd(s, ['mkdir', '-p', dstDir]);
+  let okN = 0;
+  for (const p of fsClip.paths) {
+    const name = p.split('/').filter(Boolean).pop() || 'file';
+    let dest = dstDir.replace(/\/+$/, '') + '/' + name;
+    if (p.replace(/\/+$/, '') === dest) dest = dstDir.replace(/\/+$/, '') + '/копия_' + name; // вставка в ту же папку
+    let r = await window.api.fsCmd(s, [fsClip.cut ? 'mv' : 'cp', '-rf', p, dest]);
+    if (!r.ok && fsClip.cut) {
+      const rc = await window.api.fsCmd(s, ['cp', '-rf', p, dest]);
+      if (rc.ok) { await window.api.fsCmd(s, ['rm', '-rf', p]); r = { ok: true }; }
+    }
+    if (r.ok) okN++;
+    else snack('Не удалось: ' + name + ' — ' + ((r.stderr || r.stdout || 'ошибка').slice(0, 100)));
+  }
+  if (fsClip.cut && okN === fsClip.paths.length) fsClip = { paths: [], cut: false };
+  showFsClipbar();
+  snack('Готово: ' + okN + ' из ' + fsClip.paths.length);
+  fsRender();
+}
+async function fsRename(p, oldName) {
+  const s = currentSerial(); if (!s) return;
+  const newName = await askText('Переименовать', 'Новое имя:', oldName);
+  if (!newName || newName === oldName) return;
+  if (/[\/\\]/.test(newName)) return snack('Имя не может содержать / или \\');
+  const parent = p.replace(/\/+$/, '').split('/').slice(0, -1).join('/') || '/';
+  const r = await window.api.fsCmd(s, ['mv', p, (parent === '/' ? '' : parent) + '/' + newName]);
+  if (r.ok) { snack('Переименовано: ' + oldName + ' → ' + newName); fsRender(); }
+  else snack('Не удалось переименовать: ' + ((r.stderr || r.stdout || 'ошибка').slice(0, 120)));
+}
+async function fsZipItems(paths, firstName) {
+  const s = currentSerial(); if (!s) return;
+  const base = (firstName || 'архив').replace(/\.[a-z0-9]+$/i, '');
+  let dest = (fsCatKind ? '/sdcard' : fsDir).replace(/\/+$/, '') + '/' + base + '.zip';
+  const ex = await window.api.fsStat(s, dest);
+  if (ex && ex.ok) dest = dest.replace(/\.zip$/, '') + '-' + Date.now().toString(36).slice(-4) + '.zip';
+  snack('Собираю ZIP: ' + dest.split('/').pop() + '…');
+  const r = await window.api.fsZipCreate(s, paths, dest);
+  if (r.ok) { snack('Архив создан: ' + r.dest + ' (' + r.files + ' файлов, ' + fmtBytesLong(r.bytes) + ')'); fsRender(); }
+  else snack('Не удалось собрать архив: ' + (r.error || ''), 6000);
+}
+$('#btn-fs-mkdir').onclick = async () => {
+  const s = currentSerial(); if (!s) return snack('Нет устройства');
+  const name = await askText('Новая папка', 'Имя новой папки:', '');
+  if (!name) return;
+  await window.api.fsCmd(s, ['mkdir', '-p', fsDir.replace(/\/+$/, '') + '/' + name]);
+  fsRender();
+};
+$('#btn-fs-newfile').onclick = async () => {
+  const s = currentSerial(); if (!s) return snack('Нет устройства');
+  const name = await askText('Новый файл', 'Имя файла (например заметка.txt):', 'новый.txt');
+  if (!name) return;
+  if (/[\/\\]/.test(name)) return snack('Имя не может содержать / или \\');
+  const target = (fsCatKind ? '/sdcard' : fsDir).replace(/\/+$/, '') + '/' + name;
+  const r = await window.api.fsCmd(s, ['sh', '-c', 'touch ' + adbShqSafe(target)]);
+  if (r.ok) { snack('Создан файл: ' + name); fsRender(); }
+  else snack('Не удалось создать: ' + ((r.stderr || r.stdout || 'ошибка').slice(0, 120)));
+};
+function adbShqSafe(p) {
+  if (/^[A-Za-z0-9_@%+=:,./\-]+$/.test(p)) return p;
+  return "'" + String(p).replace(/'/g, "'\\''") + "'";
+}
+$('#btn-fs-paste').onclick = () => fsPasteInto(fsCatKind ? '/sdcard' : fsDir);
+$('#btn-fs-clipcancel').onclick = () => { fsClip = { paths: [], cut: false }; showFsClipbar(); };
+
+/* ================= v2.8.0: «Переместить в… / Копировать в…» — выбор папки назначения ======= */
+const fsm = { paths: [], move: true, dir: '/sdcard', resolve: null };
+function fsmRenderList() {
+  const box = $('#fsm-list');
+  box.innerHTML = '<div class="empty">Читаю папки…</div>';
+  window.api.fsList(currentSerial(), fsm.dir).then(r => {
+    if (!r.ok) { box.innerHTML = '<div class="empty">Не удалось открыть: ' + esc(r.error || '') + '</div>'; return; }
+    const dirs = (r.items || []).filter(x => x.dir);
+    $('#fsm-path').value = fsm.dir;
+    box.innerHTML = dirs.map(d => `<div class="list-row" data-fsmd="${esc(d.name)}">
+      <span class="fs-ico-wrap"><img class="fs-ico" src="${window.FSICONS.iconFor('', true).src}" alt=""></span>
+      <span class="grow2">${esc(d.name)}</span><span class="muted small">открыть</span></div>`).join('') || '<div class="empty">Вложенных папок нет</div>';
+    box.querySelectorAll('[data-fsmd]').forEach(el => el.onclick = () => {
+      fsm.dir = fsm.dir.replace(/\/+$/, '') + '/' + el.dataset.fsmd;
+      fsmRenderList();
+    });
+  });
+}
+function openFsMoveDialog(paths, move, firstName) {
+  const s = currentSerial(); if (!s) return snack('Нет устройства');
+  fsm.paths = paths; fsm.move = !!move;
+  fsm.dir = fsCatKind ? '/sdcard' : (fsFlash && (fsDir + '/').startsWith(fsFlash) ? fsFlash : '/sdcard');
+  $('#fsm-title').textContent = move ? 'Переместить в…' : 'Копировать в…';
+  $('#fsm-sub').textContent = (move ? 'Переместить' : 'Скопировать') + ' «' + (firstName || paths[0].split('/').pop()) + '» в выбранную папку. Папку можно открыть на любом томе (память/флешка).';
+  openDlg('dlg-fsmove');
+  fsmRenderList();
+}
+$('#btn-fsm-up').onclick = () => { const p = fsm.dir.replace(/\/+$/, '').split('/'); p.pop(); fsm.dir = p.join('/') || '/'; fsmRenderList(); };
+$('#btn-fsm-refresh').onclick = fsmRenderList;
+$('#fsm-path').addEventListener('keydown', (e) => { if (e.key === 'Enter') { fsm.dir = fsNormalize($('#fsm-path').value.trim() || '/sdcard'); fsmRenderList(); } });
+$('#btn-fsm-ok').onclick = async () => {
+  const dest = fsNormalize($('#fsm-path').value.trim() || fsm.dir);
+  closeDlg('dlg-fsmove');
+  if (fsm.resolve) { const fn = fsm.resolve; fsm.resolve = null; fn(dest); return; }
+  const s = currentSerial();
+  snack((fsm.move ? 'Перемещаю ' : 'Копирую ') + fsm.paths.length + ' объект(ов) → ' + dest + '…');
+  await window.api.fsCmd(s, ['mkdir', '-p', dest]);
+  for (const p of fsm.paths) {
+    const name = p.split('/').filter(Boolean).pop();
+    let r = await window.api.fsCmd(s, [fsm.move ? 'mv' : 'cp', '-rf', p, dest + '/' + name]);
+    if (!r.ok && fsm.move) {
+      const rc = await window.api.fsCmd(s, ['cp', '-rf', p, dest + '/' + name]);
+      if (rc.ok) { await window.api.fsCmd(s, ['rm', '-rf', p]); r = { ok: true }; }
+    }
+    if (!r.ok) snack('Не удалось: ' + name + ' — ' + ((r.stderr || r.stdout || 'ошибка').slice(0, 100)));
+  }
+  snack('Готово → ' + dest);
+  fsRender();
+};
+
+/* ================= v2.8.0: ПРОСМОТР АРХИВА БЕЗ РАСПАКОВКИ (как в Проводнике) ============== */
+const arc = { path: null, name: '', entries: [] };
+async function openArcViewer(archivePath, arcName) {
+  const s = currentSerial(); if (!s) return snack('Нет устройства');
+  arc.path = archivePath; arc.name = arcName || archivePath.split('/').pop();
+  $('#arc-title').textContent = arc.name;
+  $('#arc-info').textContent = 'Читаю содержимое…';
+  $('#arc-list').innerHTML = '<div class="empty">Скачиваю архив и читаю оглавление…</div>';
+  openDlg('dlg-arcview');
+  const r = await window.api.fsZipList(s, archivePath);
+  if (!r.ok) { $('#arc-list').innerHTML = '<div class="empty">' + esc(r.error || 'не удалось прочитать архив') + '</div>'; return; }
+  arc.entries = r.entries || [];
+  const files = arc.entries.filter(e => !e.dir);
+  $('#arc-info').textContent = 'файлов: ' + files.length + (r.size ? ' · ' + fmtBytesLong(r.size) : '');
+  arcRenderList();
+}
+function arcRenderList() {
+  const box = $('#arc-list');
+  const q = ($('#arc-filter').value || '').toLowerCase();
+  let list = arc.entries;
+  if (q) list = list.filter(e => e.name.toLowerCase().includes(q));
+  box.innerHTML = list.map((e, i) => `<div class="list-row" data-arci="${i}">
+      <input type="checkbox" data-arcsel="${i}" ${e.dir ? 'disabled' : ''}>
+      <span class="fs-ico-wrap"><img class="fs-ico" src="${window.FSICONS.iconFor(e.dir ? '' : e.name.split('/').pop(), e.dir).src}" alt=""></span>
+      <span class="mono grow2" style="cursor:pointer">${esc(e.name)}</span>
+      <span class="muted small">${e.dir ? 'папка' : fmtBytesLong(e.usize || 0)}</span>
+      ${e.dir ? '' : '<button class="btn btn-text btn-sm" data-arcview="' + i + '" data-tip="Посмотреть файл, не распаковывая архив">Посмотреть</button>'}
+      ${e.dir ? '' : '<button class="btn btn-text btn-sm" data-arcsave="' + i + '" data-tip="Сохранить файл на компьютер">Скачать</button>'}
+    </div>`).join('') || '<div class="empty">В архиве нет файлов под фильтр</div>';
+  box.querySelectorAll('.list-row .mono').forEach(el => el.ondblclick = () => {
+    const row = el.closest('[data-arci]');
+    const e = arc.entries[+row.dataset.arci];
+    if (e && !e.dir) arcViewEntry(e);
+  });
+  box.querySelectorAll('[data-arcview]').forEach(b => b.onclick = () => arcViewEntry(arc.entries[+b.dataset.arcview]));
+  box.querySelectorAll('[data-arcsave]').forEach(b => b.onclick = async () => {
+    const e = arc.entries[+b.dataset.arcsave];
+    const s = currentSerial();
+    const r = await window.api.fsZipRead(s, arc.path, e.name);
+    if (!r.ok) return snack(r.error || 'не удалось прочитать файл из архива');
+    const sv = await window.api.pickSave({ defaultPath: e.name.split('/').pop() });
+    if (!sv || sv.canceled) return;
+    const wr = await window.api.fsTmpWrite(e.name.split('/').pop() + '.' + Date.now().toString(36), bytesToB64(new Uint8Array(r.buf)));
+    if (!wr.ok) return snack('Не удалось подготовить файл: ' + (wr.error || ''));
+    // fsTmpWrite пишет во временную папку — копируем в выбранное место через push-механику нет;
+    // используем прямой путь: fsTmpWrite в tmp, затем показать в папке
+    await window.api.shellOpenPath(wr.path);
+    snack('Файл из архива: ' + wr.path);
+  });
+}
+async function arcViewEntry(e) {
+  const s = currentSerial();
+  snack('Читаю из архива: ' + e.name.split('/').pop() + '…');
+  const r = await window.api.fsZipRead(s, arc.path, e.name);
+  if (!r.ok) return snack(r.error || 'не удалось прочитать файл из архива');
+  const nm = e.name.split('/').pop();
+  const wr = await window.api.fsTmpWrite('arcview-' + Date.now().toString(36) + '-' + nm, bytesToB64(new Uint8Array(r.buf)));
+  if (!wr.ok) return snack('Не удалось подготовить просмотр: ' + (wr.error || ''));
+  const op = await window.api.shellOpenPath(wr.path);
+  if (!op.ok) snack('Системная программа не открыла файл: ' + (op.error || ''));
+}
+$('#arc-filter').addEventListener('input', arcRenderList);
+$('#btn-arc-extract-all').onclick = async () => {
+  closeDlg('dlg-arcview');
+  const s = currentSerial();
+  const b = { disabled: false };
+  snack('Распаковываю ' + arc.name + '…');
+  const r = await window.api.fsExtract(s, arc.path);
+  if (r.ok) { snack('Распаковано (' + (r.where || 'на устройстве') + '): ' + r.files + ' файлов → ' + r.dest); fsNavigate(r.dest); }
+  else snack(r.error || 'Не удалось распаковать', 6000);
+};
+$('#btn-arc-extract-sel').onclick = async () => {
+  const sel = $$('#arc-list [data-arcsel]:checked').map(c => arc.entries[+c.dataset.arcsel]).filter(e => e && !e.dir);
+  if (!sel.length) return snack('Отметьте файлы галочками');
+  const s = currentSerial();
+  const dest = arc.path.replace(/\.[^/.]+$/, '') + '_распаковано';
+  await window.api.fsCmd(s, ['mkdir', '-p', dest]);
+  snack('Извлекаю ' + sel.length + ' файл(ов)…');
+  let ok = 0;
+  for (const e of sel) {
+    const r = await window.api.fsZipRead(s, arc.path, e.name);
+    if (!r.ok) continue;
+    const nm = e.name.split('/').pop();
+    const wr = await window.api.fsTmpWrite('arcsel-' + Date.now().toString(36) + '-' + nm, bytesToB64(new Uint8Array(r.buf)));
+    if (!wr.ok) continue;
+    const rel = e.name.replace(/^\/+/, '').split('/').slice(0, -1).join('/');
+    if (rel) await window.api.fsCmd(s, ['mkdir', '-p', dest + '/' + rel]);
+    const pr = await window.api.fsPush(s, wr.path, dest + (rel ? '/' + rel : ''));
+    if (pr.ok) ok++;
+  }
+  snack('Извлечено: ' + ok + ' из ' + sel.length + ' → ' + dest);
+  closeDlg('dlg-arcview');
+  fsNavigate(dest);
+};
+
+/* ================= v2.8.0: ИНСТРУМЕНТЫ USB/OTG-ФЛЕШКИ ================================== */
+let usbVol = null;
+async function openUsbTools(vol) {
+  usbVol = vol;
+  openDlg('dlg-usbtools');
+  $('#usb-log').textContent = '';
+  usbRefreshInfo();
+}
+async function usbRefreshInfo() {
+  const s = currentSerial(); if (!s || !usbVol) return;
+  $('#usb-info').textContent = 'Читаю данные тома…';
+  const r = await window.api.usbInfo(s, usbVol);
+  if (!r.ok) { $('#usb-info').textContent = 'Ошибка: ' + (r.error || ''); return; }
+  const parts = ['Том: /storage/' + usbVol];
+  if (r.fstype) parts.push('ФС: ' + r.fstype);
+  if (r.dev) parts.push('устройство: ' + r.dev);
+  if (r.total) parts.push('объём: ' + r.total + 'К, занято ' + r.used + 'К, свободно ' + r.free + 'К');
+  if (r.mounted === false) parts.push('НЕ СМОНТИРОВАНА');
+  $('#usb-info').textContent = parts.join(' · ');
+}
+function usbLog(t) { const el = $('#usb-log'); el.textContent += t + '\n'; el.scrollTop = el.scrollHeight; }
+$('#btn-usb-refresh').onclick = usbRefreshInfo;
+$('#btn-usb-check').onclick = async () => {
+  const s = currentSerial(); if (!s) return;
+  usbLog('Проверяю файловую систему (попробую fsck, иначе перемонтирование)…');
+  const r = await window.api.usbCheck(s, usbVol);
+  usbLog((r.ok ? '✓ ' : '✗ ') + (r.tool ? r.tool + ': ' : '') + (r.message || r.error || ''));
+  if (r.ok) snack('Проверка завершена — подробности в журнале ниже');
+};
+$('#btn-usb-eject').onclick = async () => {
+  const s = currentSerial();
+  const r = await window.api.usbEject(s, usbVol);
+  snack(r.message || (r.ok ? 'Извлечено' : 'Не удалось извлечь'));
+  if (r.ok) { closeDlg('dlg-usbtools'); renderFsVolumes(); }
+};
+$('#btn-usb-label').onclick = async () => {
+  const s = currentSerial();
+  const label = $('#usb-label').value.trim();
+  if (!label) return snack('Введите метку тома');
+  const yes = await uiConfirm('Смена метки', 'Метка меняется ПЕРЕСОЗДАНИЕМ файловой системы — ВСЕ ДАННЫЕ будут стёрты. Продолжить?');
+  if (!yes || !yes.ok) return;
+  usbLog('Меняю метку на «' + label + '»…');
+  const r = await window.api.usbLabel(s, usbVol, label);
+  usbLog((r.ok ? '✓ ' : '✗ ') + (r.message || r.error || ''));
+};
+$('#btn-usb-format').onclick = async () => {
+  const s = currentSerial();
+  const label = $('#usb-label').value.trim();
+  const yes = await uiConfirm('Форматирование', 'ПОЛНОСТЬЮ отформатировать флешку ' + usbVol + '? ВСЕ ДАННЫЕ БУДУТ СТЁРТЫ.');
+  if (!yes || !yes.ok) return;
+  usbLog('Форматирую…');
+  const r = await window.api.usbFormat(s, usbVol, label || null);
+  usbLog((r.ok ? '✓ ' : '✗ ') + (r.message || r.error || ''));
+  for (const w of (r.warnings || [])) usbLog('· ' + w);
+  if (r.ok) snack('Форматирование выполнено');
+};
+$('#btn-usb-fake').onclick = async () => {
+  const s = currentSerial();
+  const blk = +$('#usb-fake-blk').value || 64;
+  $('#usb-fake-progress').classList.remove('hidden');
+  $('#usb-fake-bar').style.width = '0%';
+  $('#usb-fake-status').textContent = 'Запускаю проверку памяти…';
+  $('#btn-usb-fake-cancel').classList.remove('hidden');
+  $('#btn-usb-fake').disabled = true;
+  const r = await window.api.usbFakeTestStart(s, usbVol, blk);
+  if (!r.ok) { $('#usb-fake-status').textContent = r.error || 'не удалось начать'; $('#btn-usb-fake').disabled = false; $('#btn-usb-fake-cancel').classList.add('hidden'); $('#usb-fake-progress').classList.add('hidden'); }
+};
+$('#btn-usb-fake-cancel').onclick = () => window.api.usbFakeTestCancel();
+function usbFakeEvent(ev) {
+  const bar = $('#usb-fake-bar'), st = $('#usb-fake-status');
+  if (!st) return;
+  if (ev.stage === 'write') { st.textContent = 'Заливаю флешку блоками по ' + ev.blk + ' МБ (записываются маркеры)…'; }
+  else if (ev.stage === 'write-progress') {
+    const mb = ev.done * (ev.blockBytes / 1048576);
+    st.textContent = 'Записано: ' + (mb >= 1024 ? (mb / 1024).toFixed(1) + ' ГБ' : Math.round(mb) + ' МБ') + ' — не выдёргивайте флешку';
+    bar.style.width = Math.min(70, ev.done * 2) + '%';
+  }
+  else if (ev.stage === 'wfail') { st.textContent = 'Запись остановилась на блоке ' + ev.at + ' (конец реального объёма). Проверяю…'; bar.style.width = '75%'; }
+  else if (ev.stage === 'verify') { st.textContent = 'Читаю маркеры назад (' + ev.written + ' блоков)…'; bar.style.width = '80%'; }
+  else if (ev.stage === 'verify-progress') { st.textContent = 'Проверено: ' + ev.done + ' / ' + ev.total; bar.style.width = (80 + 18 * ev.done / Math.max(1, ev.total)) + '%'; }
+  else if (ev.stage === 'done') {
+    $('#btn-usb-fake').disabled = false;
+    $('#btn-usb-fake-cancel').classList.add('hidden');
+    bar.style.width = '100%';
+    const real = ev.realBytes || 0;
+    const realTxt = real >= 1073741824 ? (real / 1073741824).toFixed(2) + ' ГБ' : Math.round(real / 1048576) + ' МБ';
+    if (ev.canceled) { st.textContent = 'Проверка остановлена. Успешно проверено: ' + realTxt; return; }
+    if (ev.wrappedAt >= 0 || ev.wfail != null) {
+      st.innerHTML = '✗ ФЕЙКОВАЯ ПАМЯТЬ: реальный объём ≈ <b>' + realTxt + '</b>. Запись «завернулась» на блоке ' +
+        (ev.wrappedAt >= 0 ? ev.wrappedAt : '(запись кончилась раньше)');
+      usbLog('РЕЗУЛЬТАТ: реальный объём ≈ ' + realTxt + ' (маркеры совпали до блока ' + (ev.wrappedAt >= 0 ? ev.wrappedAt - 1 : ev.writtenBlocks - 1) + ')');
+      usbLog('Что делать: сохраняйте на неё не больше ' + realTxt + '; честный объём можно задать утилитой производителя (SD Card Formatter / H2testw после подключения к ПК).');
+      snack('Похоже на фейковую память: реальный объём ≈ ' + realTxt, 10000);
+    } else {
+      st.innerHTML = '✓ Память ЧЕСТНАЯ: все ' + ev.writtenBlocks + ' блоков прочитались верно (≥ ' + realTxt + ')';
+      usbLog('РЕЗУЛЬТАТ: память честная, проверено ≥ ' + realTxt);
+      snack('Память оригинальная (проверено ≥ ' + realTxt + ')', 8000);
+    }
+  }
+  else if (ev.stage === 'error') { $('#btn-usb-fake').disabled = false; $('#btn-usb-fake-cancel').classList.add('hidden'); st.textContent = 'Ошибка: ' + (ev.error || ''); }
+  else if (ev.stage === 'canceled') { st.textContent = 'Остановлено.'; }
+}
+
 /* свойства файла/папки (F6); v2.7.0: + распаковка архивов, открытие текста/PDF/HTML,
    родная иконка и имя APK-файла с телефона, Android-бейдж на иконке */
 async function openFsProps(it) {
   const s = currentSerial();
   if (!s) return snack('Нет устройства');
-  const full = (fsDir.replace(/\/+$/, '') + '/' + it.name);
+  const full = it.path || (fsDir.replace(/\/+$/, '') + '/' + it.name); // v2.8.0: путь из категории тоже
   const isApk = !it.dir && APK_RE.test(it.name);
   const ic = window.FSICONS.iconFor(it.name, it.dir);
   // Android-бейдж в углу иконки для APK (требование владельца); обёртка идемпотентная
@@ -1818,10 +2346,17 @@ async function openFsProps(it) {
   };
   const openBtns = [];
   if (!it.dir) {
-    if (TXT_RE.test(it.name) || PDF_RE.test(it.name)) openBtns.push(addBtn('btn-fsprop-open', TXT_RE.test(it.name) ? 'Открыть как текст' : 'Открыть PDF', 'Просмотр прямо в программе'));
+    if (TXT_RE.test(it.name) || PDF_RE.test(it.name) || DOCX_RE.test(it.name) || VCF_RE.test(it.name)) openBtns.push(addBtn('btn-fsprop-open', DOCX_RE.test(it.name) ? 'Открыть документ' : VCF_RE.test(it.name) ? 'Открыть контакты' : TXT_RE.test(it.name) ? 'Открыть как текст' : 'Открыть PDF', 'Просмотр прямо в программе'));
     if (HTML_RE.test(it.name)) openBtns.push(addBtn('btn-fsprop-html', 'Открыть в браузере', 'Скачает и откроет в системном браузере — со всеми скриптами и CDN'));
+    if (ARC_RE.test(it.name)) openBtns.push(addBtn('btn-fsprop-arcview', 'Открыть архив (не распаковывая)', 'Содержимое ZIP/JAR со списком файлов и точечным извлечением'));
     if (ARC_RE.test(it.name)) openBtns.push(addBtn('btn-fsprop-extract', 'Распаковать в папку', 'Распаковать архив в папку с именем архива, в эту же папку устройства'));
   }
+  // v2.8.0: Копировать/Вырезать/Переименовать/В архив — прямо из свойств (для всех)
+  const actBtns = [];
+  actBtns.push(addBtn('btn-fsprop-clipcopy', 'Копировать', 'Положить в буфер: вставьте в любой папке (панель «Вставить сюда»)'));
+  actBtns.push(addBtn('btn-fsprop-clipcut', 'Вырезать', 'Переместить: вставьте в любой папке'));
+  actBtns.push(addBtn('btn-fsprop-rename', 'Переименовать', 'Переименовать файл или папку'));
+  actBtns.push(addBtn('btn-fsprop-tozip', 'В архив ZIP', 'Собрать ZIP (файлы/папки) в текущей папке'));
   openDlg('dlg-fsprop');
   const st = await window.api.fsStat(s, full);
   const isDir = it.dir || /directory/i.test(st.kind || '');
@@ -1850,10 +2385,47 @@ async function openFsProps(it) {
     } else if (meta && meta.reason === 'big') {
       $('#fsprop-body').insertAdjacentHTML('afterbegin', '<div class="prop-row"><b>Иконка приложения:</b><span>APK больше 80 МБ — для скорости не разбираю</span></div>');
     }
+    // v2.8.0: СРАВНЕНИЕ С УСТАНОВЛЕННОЙ ВЕРСИЕЙ + кнопка «Установить на телефон»
+    if (meta && meta.ok && meta.package) {
+      const inst = await window.api.apkInstalledInfo(s, meta.package).catch(() => null);
+      const fileV = meta.versionName || null;
+      if (inst && inst.installed) {
+        const cmp = (() => {
+          const a = String(inst.versionCode || ''), b = String(meta.versionCode || '');
+          if (a && b && +a > +b) return 'УСТАНОВЛЕННАЯ НОВЕЕ файла';
+          if (a && b && +a < +b) return 'файл НОВЕЕ установленной';
+          if (String(inst.versionName || '') === String(fileV || '')) return 'версии совпадают';
+          return 'версии различаются';
+        })();
+        $('#fsprop-body').insertAdjacentHTML('beforeend',
+          '<div class="prop-row"><b>Установлено на телефоне:</b><span>v' + esc(inst.versionName || '?') + (inst.versionCode ? ' (код ' + esc(inst.versionCode) + ')' : '') + ' · ' + esc(cmp) + '</span></div>');
+      } else {
+        $('#fsprop-body').insertAdjacentHTML('beforeend',
+          '<div class="prop-row"><b>Установлено на телефоне:</b><span>не установлено</span></div>');
+      }
+      if (/\.apk$/i.test(it.name)) {
+        const ib = addBtn('btn-fsprop-phoneinstall', 'Установить на телефон', 'Установить этот APK прямо с памяти телефона (pm install -r) — без скачивания на ПК');
+        ib.classList.add('btn-filled');
+        ib.onclick = async () => {
+          ib.disabled = true; ib.textContent = 'Устанавливаю…';
+          const r = await window.api.apkPhoneInstall(s, full);
+          ib.disabled = false; ib.textContent = 'Установить на телефон';
+          if (r.ok) snack('Установлено: ' + (meta.label || it.name));
+          else snack('Не удалось установить: ' + (r.message || r.error || 'ошибка'), 7000);
+        };
+      }
+    }
+  }
+  for (const b of actBtns) {
+    if (b.id === 'btn-fsprop-clipcopy') b.onclick = () => { fsClip = { paths: [full], cut: false }; showFsClipbar(); snack('Скопировано в буфер: ' + it.name); };
+    if (b.id === 'btn-fsprop-clipcut') b.onclick = () => { fsClip = { paths: [full], cut: true }; showFsClipbar(); snack('Вырезано: ' + it.name); };
+    if (b.id === 'btn-fsprop-rename') b.onclick = () => { closeDlg('dlg-fsprop'); fsRename(full, it.name); };
+    if (b.id === 'btn-fsprop-tozip') b.onclick = () => { closeDlg('dlg-fsprop'); fsZipItems([full], it.name); };
   }
   for (const b of openBtns) {
     if (b.id === 'btn-fsprop-open') b.onclick = () => { closeDlg('dlg-fsprop'); openTextViewer(full); };
     if (b.id === 'btn-fsprop-html') b.onclick = () => { closeDlg('dlg-fsprop'); openHtmlOnPc(full, it.name); };
+    if (b.id === 'btn-fsprop-arcview') b.onclick = () => { closeDlg('dlg-fsprop'); openArcViewer(full, it.name); };
     if (b.id === 'btn-fsprop-extract') b.onclick = async () => {
       b.disabled = true; b.textContent = 'Распаковываю…';
       const r = await window.api.fsExtract(s, full);
@@ -1886,11 +2458,26 @@ async function renderFsVolumes() {
   box.innerHTML = flashVols.map(v => {
     const isSd = /sdcard/i.test(v);
     const ico = isSd ? SD_ICON_SVG : USB_ICON_SVG;
-    return `<button class="chip vol-chip" data-vol="${esc(v)}" data-tip="Открыть флешку: /storage/${esc(v)}">
+    return `<button class="chip vol-chip" data-vol="${esc(v)}" data-tip="Открыть флешку: /storage/${esc(v)} (правая кнопка — меню)">
       <img src="${ico}" alt="">Флешка ${esc(v)}</button>`;
   }).join('') +
-    (fsFlash ? '<span class="muted small" data-tip="Кнопки «На флешку»/«На телефон» появляются у файлов, когда флешка вставлена">обмен телефон ⟷ флешка включён</span>' : '');
-  box.querySelectorAll('[data-vol]').forEach(b => b.onclick = () => fsNavigate('/storage/' + b.dataset.vol));
+    (fsFlash ? '<button class="chip" id="btn-usb-tools" data-tip="Форматирование, метка тома, проверка ошибок, проверка на фейковую память">⚙ Инструменты флешки</button>' +
+      '<span class="muted small" data-tip="Кнопки «На флешку»/«На телефон» появляются у файлов, когда флешка вставлена">обмен телефон ⟷ флешка включён</span>' : '');
+  box.querySelectorAll('[data-vol]').forEach(b => {
+    b.onclick = () => fsNavigate('/storage/' + b.dataset.vol);
+    b.oncontextmenu = (e) => {
+      e.preventDefault();
+      openFsContextMenu(e.clientX, e.clientY, { name: 'Флешка ' + b.dataset.vol, dir: true }, {
+        path: '/storage/' + b.dataset.vol,
+        open: () => fsNavigate('/storage/' + b.dataset.vol),
+        props: () => openUsbTools(b.dataset.vol),
+        download: null,
+        refresh: renderFsVolumes
+      });
+    };
+  });
+  const ut = document.getElementById('btn-usb-tools');
+  if (ut) ut.onclick = () => openUsbTools(flashVols[0]);
 }
 
 /* ---------- v2.6: просмотрщик изображений (зум, пан, полный экран, листание) ---------- */
@@ -2043,7 +2630,8 @@ function toggleMonitorFullscreen(el) {
    v2.7.2: + КОПИРОВАНИЕ, РЕДАКТИРОВАНИЕ с записью обратно на телефон (utf-8/windows-1251
    сохраняется) и ПРЕВЬЮ HTML-файлов как страницы (iframe с локальной временной копии) */
 const tv = { full: null, isPdf: false, pdfDoc: null, pdfPage: 1, pdfLibLoading: false,
-             text: '', buf: null, encoding: 'utf-8', editing: false, isHtml: false, previewing: false };
+             text: '', buf: null, encoding: 'utf-8', editing: false, isHtml: false, previewing: false,
+             isDocx: false, isVcf: false };
 function bytesToB64(u8) {
   let s = '', CH = 0x8000;
   for (let i = 0; i < u8.length; i += CH) s += String.fromCharCode.apply(null, u8.subarray(i, i + CH));
@@ -2064,17 +2652,82 @@ function encode1251(str) {
   return out;
 }
 function tvButtons() {
-  $('#textview-copy').classList.toggle('hidden', tv.isPdf);
-  $('#textview-edit').classList.toggle('hidden', tv.isPdf || !tv.text);
+  $('#textview-copy').classList.toggle('hidden', tv.isPdf || tv.isDocx || tv.isVcf);
+  $('#textview-edit').classList.toggle('hidden', tv.isPdf || !tv.text || tv.isDocx || tv.isVcf);
   $('#textview-save').classList.add('hidden');
   $('#textview-preview').classList.toggle('hidden', !tv.isHtml);
   $('#textview-code').classList.add('hidden');
+}
+// v2.8.0: показать СФОРМИРОВАННЫЙ HTML (DOCX/контакты VCF) во встроенном фрейме
+function tvShowHtml(html, statusText) {
+  const frame = $('#textview-frame'), pre = $('#textview-pre');
+  const doc = '<!DOCTYPE html><html lang="ru"><head><meta charset="utf-8"><style>' +
+    'body{font-family:Segoe UI,Roboto,sans-serif;max-width:760px;margin:0 auto;padding:22px 26px;color:#1c2430;background:#fff;line-height:1.55}' +
+    'h1{font-size:22px;margin:2px 0 10px}h2,h3{margin:16px 0 6px}p{margin:8px 0}' +
+    '.docx-tbl{border-collapse:collapse;margin:10px 0}.docx-tbl td,.docx-tbl th{border:1px solid #c9d2dc;padding:5px 9px;font-size:14px}' +
+    '.docx-li{margin:4px 0 4px 10px}' +
+    '.vcf-card{border:1px solid #d7dee6;border-radius:12px;padding:12px 16px;margin:10px 0;background:#f7f9fb}' +
+    '.vcf-name{font-size:17px;font-weight:700;margin-bottom:4px}' +
+    '.vcf-row{margin:2px 0;font-size:14px;color:#2a3644}.vcf-row b{color:#5a6a7c;font-weight:600;margin-right:6px}' +
+    '.vcf-row a{color:#0a66d0;text-decoration:none}' +
+    '</style></head><body>' + html + '</body></html>';
+  frame.srcdoc = doc;
+  frame.classList.remove('hidden');
+  pre.classList.add('hidden');
+  $('#textview-status').textContent = statusText;
+}
+// v2.8.0: парсер vCard (.vcf) — карточки контактов: имя, телефоны, email, организация и др.
+function vcfToHtml(text) {
+  const lines = String(text || '').replace(/\r\n/g, '\n').replace(/\r/g, '\n').split('\n');
+  // разворачиваем свернутые строки (продолжение с пробела в начале)
+  const unfolded = [];
+  for (const l of lines) {
+    if (/^[ \t]/.test(l) && unfolded.length) unfolded[unfolded.length - 1] += l.slice(1);
+    else unfolded.push(l);
+  }
+  const escH = (s) => String(s == null ? '' : s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+  const unesc = (s) => String(s || '').replace(/\\n/gi, ' ').replace(/\\,/g, ',').replace(/\\;/g, ';').replace(/\\\\/g, '\\');
+  const cards = [];
+  let cur = null;
+  for (const l of unfolded) {
+    const t = l.trim();
+    if (/^BEGIN:VCARD/i.test(t)) { cur = { name: '', rows: [] }; continue; }
+    if (/^END:VCARD/i.test(t)) { if (cur) cards.push(cur); cur = null; continue; }
+    if (!cur) continue;
+    const m = t.match(/^([^:;]+)((?:;[^:]*)?):(.*)$/);
+    if (!m) continue;
+    const key = m[1].toUpperCase().split(';')[0];
+    const params = m[2] || '';
+    let val = unesc(m[3]);
+    if (!val.trim()) continue;
+    if (key === 'FN') cur.name = val;
+    else if (key === 'N') {
+      const parts = val.split(/[;,]/).map(x => x.trim()).filter(Boolean);
+      if (!cur.name && parts.length) cur.name = parts.slice(0, 2).reverse().join(' ');
+    }
+    else if (key === 'TEL') { const t2 = (params.match(/TYPE=([^;:]+)/i) || [])[1]; cur.rows.push(['Телефон' + (t2 ? ' (' + t2.toLowerCase() + ')' : ''), '<a href="tel:' + escH(val.replace(/[^\d+]/g, '')) + '">' + escH(val) + '</a>']); }
+    else if (key === 'EMAIL') cur.rows.push(['Email', '<a href="mailto:' + escH(val) + '">' + escH(val) + '</a>']);
+    else if (key === 'ORG') cur.rows.push(['Организация', escH(val.replace(/;/g, ' · '))]);
+    else if (key === 'TITLE') cur.rows.push(['Должность', escH(val)]);
+    else if (key === 'ADR') cur.rows.push(['Адрес', escH(val.replace(/;/g, ', ').replace(/,+$/, ''))]);
+    else if (key === 'NOTE') cur.rows.push(['Заметка', escH(val)]);
+    else if (key === 'BDAY') cur.rows.push(['День рождения', escH(val)]);
+    else if (key === 'URL') cur.rows.push(['Сайт', '<a href="' + escH(val) + '" target="_blank">' + escH(val) + '</a>']);
+    else if (key === 'IMPP' || key === 'X-...' || key === 'NICKNAME') cur.rows.push([key === 'NICKNAME' ? 'Ник' : 'Мессенджер', escH(val.replace(/^.*:/, ''))]);
+  }
+  if (!cards.length) return null;
+  return '<h1>Контакты: ' + cards.length + '</h1>' + cards.map(c =>
+    '<div class="vcf-card"><div class="vcf-name">' + escH(c.name || '(без имени)') + '</div>' +
+    c.rows.map(r => '<div class="vcf-row"><b>' + r[0] + ':</b> ' + r[1] + '</div>').join('') +
+    '</div>').join('');
 }
 async function openTextViewer(full) {
   const s = currentSerial(); if (!s) return;
   tv.full = full;
   tv.isPdf = PDF_RE.test(full);
   tv.isHtml = HTML_RE.test(full);
+  tv.isDocx = DOCX_RE.test(full);   // v2.8.0
+  tv.isVcf = VCF_RE.test(full);     // v2.8.0
   tv.editing = false; tv.previewing = false; tv.text = ''; tv.buf = null; tv.encoding = 'utf-8';
   const name = full.split('/').pop();
   $('#textview-title').textContent = name;
@@ -2083,12 +2736,26 @@ async function openTextViewer(full) {
   $('#textview-pre').classList.remove('hidden');
   const frame = $('#textview-frame');
   frame.classList.add('hidden');
+  try { frame.srcdoc = ''; } catch (e) {}
   try { frame.src = 'about:blank'; } catch (e) {}
   $('#textview-pre').contentEditable = 'false';
   $('#pdfview-box').classList.toggle('hidden', !tv.isPdf);
   tvButtons();
   openDlg('dlg-textview');
   if (tv.isPdf) return loadPdf(full);
+  // v2.8.0: DOCX — тянем файл целиком, конвертируем в HTML на ПК (word/document.xml), показываем во фрейме
+  if (tv.isDocx) {
+    const pre0 = $('#textview-pre');
+    pre0.textContent = 'Читаю документ…';
+    const d = await window.api.fsDocx(s, full).catch(() => null);
+    if (d && d.ok) { tvShowHtml(d.html, full + ' · документ DOCX'); }
+    else {
+      pre0.textContent = '';
+      $('#textview-status').textContent = (d && d.error) || 'Не удалось прочитать DOCX';
+      snack((d && d.error) || 'Не удалось прочитать DOCX — попробуйте «Скачать» или «На ПК»', 6000);
+    }
+    return;
+  }
   const pre = $('#textview-pre');
   pre.textContent = 'Загрузка…';
   const r = await window.api.fsCat(s, full, 8);
@@ -2102,6 +2769,12 @@ async function openTextViewer(full) {
   // декодирование: UTF-8, при сбое — windows-1251 (файлы с русским текстом в 866/1251)
   try { tv.text = new TextDecoder('utf-8', { fatal: true }).decode(tv.buf); tv.encoding = 'utf-8'; }
   catch (e) { try { tv.text = new TextDecoder('windows-1251').decode(tv.buf); tv.encoding = 'windows-1251'; } catch (e2) { tv.text = tv.buf.toString('latin1'); tv.encoding = 'latin1'; } }
+  // v2.8.0: VCF — карточки контактов во фрейме (и «чистый текст» доступен по кнопке «Код»-стиля нет — vcf простой текст)
+  if (tv.isVcf) {
+    const html = vcfToHtml(tv.text);
+    if (html) { tvShowHtml(html, full + ' · контакты vCard'); return; }
+    // не распарсился — покажем как обычный текст ниже
+  }
   const shown = tv.text.length > 400000 ? tv.text.slice(0, 400000) : tv.text;
   $('#textview-pos').textContent = tv.text.length > 400000 ? '(показаны первые 400 000 символов)' : '';
   pre.textContent = shown;
@@ -2225,7 +2898,7 @@ $('#textview-openpc').onclick = async () => {
 async function openHtmlOnPc(full, name) {
   const s = currentSerial(); if (!s) return;
   const yes = await uiConfirm('Открыть HTML в браузере', '«' + name + '» будет скачан во временную папку и открыт в системном браузере — так работают все скрипты, стили и CDN. Открыть?');
-  if (!yes) return;
+  if (!yes || !yes.ok) return;
   snack('Скачиваю и открываю в браузере…');
   const r = await window.api.fsOpenOnPc(s, full);
   snack(r.ok ? 'Открыто в системном браузере: ' + name : (r.error || 'Не удалось'));
@@ -2239,9 +2912,14 @@ const mp = {
   list: [], idx: 0, isVideo: false,
   ctx: null, src: null, analyser: null, filters: [], out: null,
   visIdx: 0, raf: 0, loadedUrl: null, wantPlay: true,
-  direct: false, silT: 0   // v2.7.2: прямой звук — если WebAudio-граф молчит, играем мимо него
+  // v2.8.0: ПРЯМОЕ воспроизведение по умолчанию (элемент el2 мимо WebAudio) — корень жалоб
+  // «чёрный экран / запускаю и ничего»: граф WebAudio (createMediaElementSource) на части
+  // машин молчит или подвешивает элемент. Эквалайзер теперь ВКЛЮЧАЕТСЯ КНОПКОЙ — тогда
+  // звук идёт через аудио-движок; всё остальное время играет напрямую, всегда надёжно.
+  eqOn: false, silT: 0
 };
 try { mp.visIdx = Math.min(window.VISLIB.length - 1, Math.max(0, parseInt(localStorage.getItem('media.vis') || '0', 10) || 0)); } catch (e) {}
+try { mp.eqOn = localStorage.getItem('media.eq') === '1'; } catch (e) {}
 const EQ_FREQS = [31, 62, 125, 250, 500, 1000, 2000, 4000, 8000, 16000];
 const EQ_PRESETS = {
   'Плоско': [0,0,0,0,0,0,0,0,0,0],
@@ -2346,7 +3024,7 @@ function mpDraw() {
 }
 async function mpLoad(full) {
   const s = currentSerial(); if (!s) return;
-  const el = $('#media-el');
+  const el = $('#media-el'), el2 = $('#media-el2');
   const name = full.split('/').pop();
   mp.isVideo = VID_RE.test(name);
   $('#media-title').textContent = name;
@@ -2355,7 +3033,6 @@ async function mpLoad(full) {
   $('#media-status').textContent = full;
   const visual = $('#media-visual');
   visual.classList.toggle('hidden-when-video', mp.isVideo);
-  el.classList.toggle('hidden', !mp.isVideo);
   const r = await window.api.fsCat(s, full);
   if (!r.ok) { $('#media-now-sub').textContent = r.error || 'Не удалось загрузить'; return; }
   if (mp.loadedUrl) { try { URL.revokeObjectURL(mp.loadedUrl); } catch (e) {} }
@@ -2363,65 +3040,66 @@ async function mpLoad(full) {
     ? (/webm$/i.test(name) ? 'video/webm' : (/mkv|avi|ts$/i.test(name) ? 'video/x-matroska' : 'video/mp4'))
     : (/ogg|opus|oga$/i.test(name) ? 'audio/ogg' : /flac$/i.test(name) ? 'audio/flac' : /wav$/i.test(name) ? 'audio/wav' : /aac$/i.test(name) ? 'audio/aac' : /m4a$/i.test(name) ? 'audio/mp4' : /wma$/i.test(name) ? 'audio/x-ms-wma' : 'audio/mpeg');
   mp.loadedUrl = URL.createObjectURL(new Blob([r.buf], { type: mime }));
-  el.volume = (+$('#media-vol').value || 80) / 100;
-  $('#media-now-sub').textContent = (mp.isVideo ? 'Видео' : 'Аудио') + ' · ' + fmtBytesLong(r.bytes || 0) + ' — запускаю…';
-  // v2.7.2: если звук уже переключен на прямой (граф молчал) — играем мимо эквалайзера
-  if (mp.direct) {
-    const el2 = $('#media-el2');
+  mp.lastFull = full;   // v2.8.0: для перезапуска при переключении режима звука
+  const sub = (mp.isVideo ? 'Видео' : 'Аудио') + ' · ' + fmtBytesLong(r.bytes || 0);
+  // v2.8.0: эквалайзер ВЫКЛЮЧЕН по умолчанию → ПРЯМОЕ воспроизведение через el2 (без WebAudio):
+  // гарантированно звучит и показывает видео на любой машине. Эквалайзер — опция (кнопка EQ).
+  if (!mp.eqOn) {
+    try { el.pause(); } catch (e) {}
+    el.classList.add('hidden');
     el2.src = mp.loadedUrl;
     el2.volume = (+$('#media-vol').value || 80) / 100;
-    el.classList.add('hidden');
     el2.classList.toggle('hidden', !mp.isVideo);
-    $('#media-now-sub').textContent = (mp.isVideo ? 'Видео' : 'Аудио') + ' · ' + fmtBytesLong(r.bytes || 0) + ' · прямое воспроизведение';
+    $('#media-now-sub').textContent = sub + ' · прямое воспроизведение';
     try { el2.load(); } catch (e) {}
-    el2.play().catch(() => { $('#media-now-sub').textContent = 'Не удалось запустить автоматически — нажмите ▶'; });
+    try {
+      await el2.play();
+      $('#media-now-sub').textContent = sub;
+    } catch (e) {
+      $('#media-now-sub').textContent = 'Не удалось запустить автоматически — нажмите ▶';
+    }
     return;
   }
+  // режим с эквалайзером: звук идёт через WebAudio-граф (el подключён к нему насовсем)
   mpEnsureAudio();
   if (mp.ctx && mp.ctx.state === 'suspended') { try { await mp.ctx.resume(); } catch (e) {} }
+  try { el2.pause(); } catch (e) {}
+  el.classList.toggle('hidden', !mp.isVideo);
+  el2.classList.add('hidden');
+  el.src = mp.loadedUrl;
+  el.volume = (+$('#media-vol').value || 80) / 100;
+  $('#media-now-sub').textContent = sub + ' · эквалайзер';
   try { el.load(); } catch (e) {}
   try {
     await el.play();
-    $('#media-now-sub').textContent = (mp.isVideo ? 'Видео' : 'Аудио') + ' · ' + fmtBytesLong(r.bytes || 0);
-    mpSilenceWatch();   // v2.7.2: проверка через 2,5 с — не молчит ли звук
+    $('#media-now-sub').textContent = sub + ' · эквалайзер';
   } catch (e) {
-    // v2.7.0: автовоспроизведение разблокировано в main (autoplay-policy), но если кодек всё же
-    // не взялся — честно сообщаем и оставляем кнопки «Скачать» и «На ПК» под рукой
-    $('#media-now-sub').textContent = 'Не удалось запустить автоматически — нажмите ▶ или «На ПК»';
-    try { await el.play(); mpSilenceWatch(); } catch (e2) {}
+    $('#media-now-sub').textContent = 'Не удалось запустить автоматически — нажмите ▶';
   }
 }
-// v2.7.2: страховка «музыка не играет»: элемент играет, а звук молчит (WebAudio-контекст
-// подвис) — через 2,5 с переключаемся на ПРЯМОЕ воспроизведение мимо эквалайзера
+// v2.8.0: страховка остаётся ТОЛЬКО для режима эквалайзера: играет el, а спектр молчит —
+// честно предлагаем выключить EQ (прямое воспроизведение всегда надёжно)
 function mpSilenceWatch() {
   clearTimeout(mp.silT);
   mp.silT = setTimeout(() => {
     const el = $('#media-el');
-    if (mp.direct || !mp.analyser || el.paused || mp.isVideo) return;
+    if (!mp.eqOn || !mp.analyser || el.paused || mp.isVideo) return;
     try {
       const n = mp.analyser.frequencyBinCount;
       const fd = new Uint8Array(n);
       mp.analyser.getByteFrequencyData(fd);
       let sum = 0; for (let i = 0; i < n; i++) sum += fd[i];
-      if (sum === 0 && !el.muted && el.volume > 0 && !el.error) mpGoDirect();
+      if (sum === 0 && !el.muted && el.volume > 0 && !el.error) {
+        mp.eqOn = false;
+        try { localStorage.setItem('media.eq', '0'); } catch (e) {}
+        const eqBox = $('#media-eq');
+        if (eqBox) eqBox.classList.add('hidden');
+        try { el.pause(); } catch (e2) {}
+        if (mp.lastFull) mpLoad(mp.lastFull).catch(() => {});
+        snack('Звук через эквалайзер молчал — вернул прямое воспроизведение');
+      }
     } catch (e) {}
   }, 2500);
-}
-function mpGoDirect() {
-  if (mp.direct) return;
-  mp.direct = true;
-  const el = $('#media-el'), el2 = $('#media-el2');
-  const t = el.currentTime, wasPaused = el.paused;
-  try { el.pause(); } catch (e) {}
-  el.classList.add('hidden');
-  el2.classList.toggle('hidden', !mp.isVideo);
-  el2.src = mp.loadedUrl;
-  el2.volume = el.volume;
-  if (t > 0) { try { el2.currentTime = t; } catch (e) {} }
-  el2.play().catch(() => {});
-  if (!wasPaused) $('#media-play').textContent = '⏸';
-  $('#media-now-sub').textContent = (mp.isVideo ? 'Видео' : 'Аудио') + ' · прямое воспроизведение (эквалайзер отключён)';
-  snack('Звук не шёл через аудио-движок — переключил плеер на прямое воспроизведение');
 }
 async function openMediaPlayer(full) {
   mp.list = mediaList();
@@ -2429,6 +3107,7 @@ async function openMediaPlayer(full) {
   mp.idx = Math.max(0, mp.list.findIndex(x => x.name === name));
   openDlg('dlg-media');
   mpBuildEq();
+  $('#media-eq').classList.toggle('hidden', !mp.eqOn);   // v2.8.0: EQ-панель видна только в режиме EQ
   mpVisLabel();
   if (!mp.raf) mp.raf = requestAnimationFrame(mpDraw);
   mpLoad(full);
@@ -2440,7 +3119,7 @@ function mpNav(d) {
 }
 (function mpEvents() {
   const el = $('#media-el'), el2 = $('#media-el2');
-  const curEl = () => mp.direct ? el2 : el;
+  const curEl = () => mp.eqOn ? el : el2;   // v2.8.0: по умолчанию прямой элемент el2
   function bindMedia(m) {
     m.onplay = () => $('#media-play').textContent = '⏸';
     m.onpause = () => $('#media-play').textContent = '▶';
@@ -2461,15 +3140,32 @@ function mpNav(d) {
   $('#media-play').onclick = async () => {
     const m = curEl();
     if (!m.src) return;
-    mpEnsureAudio();
-    if (mp.ctx && mp.ctx.state === 'suspended') { try { await mp.ctx.resume(); } catch (e) {} }
+    if (mp.eqOn) {   // v2.8.0: WebAudio нужен ТОЛЬКО в режиме эквалайзера
+      mpEnsureAudio();
+      if (mp.ctx && mp.ctx.state === 'suspended') { try { await mp.ctx.resume(); } catch (e) {} }
+    }
     m.paused ? m.play() : m.pause();
   };
   $('#media-seek').oninput = () => { const m = curEl(); if (m.duration) m.currentTime = (+$('#media-seek').value / 1000) * m.duration; };
   $('#media-vol').oninput = () => { const m = curEl(); m.volume = (+$('#media-vol').value) / 100; };
   $('#media-prev').onclick = () => mpNav(-1);
   $('#media-next').onclick = () => mpNav(1);
-  $('#media-eqbtn').onclick = () => { mpEnsureAudio(); $('#media-eq').classList.toggle('hidden'); };
+  // v2.8.0: EQ — опция. ВКЛ: звук через WebAudio (перезапуск текущего трека с той же позиции);
+  // ВЫКЛ: обратно на прямое воспроизведение. Так «чёрный экран/молчание» невозможны по умолчанию.
+  $('#media-eqbtn').onclick = async () => {
+    const wasOn = mp.eqOn;
+    mp.eqOn = !wasOn;
+    try { localStorage.setItem('media.eq', mp.eqOn ? '1' : '0'); } catch (e) {}
+    $('#media-eq').classList.toggle('hidden', !mp.eqOn);
+    const m = curEl();
+    const t = (m && m.currentTime) || 0;
+    if (mp.eqOn) mpEnsureAudio();
+    if (mp.ctx && mp.ctx.state === 'suspended') { try { await mp.ctx.resume(); } catch (e) {} }
+    if (mp.lastFull) { await mpLoad(mp.lastFull).catch(() => {}); }
+    const m2 = curEl();
+    if (t > 0 && m2 && m2.duration) { try { m2.currentTime = Math.min(t, m2.duration - 0.5); } catch (e) {} }
+    snack(mp.eqOn ? 'Эквалайзер включён (звук через аудио-движок)' : 'Прямое воспроизведение (эквалайзер выключен)');
+  };
   // v2.7.0: «Скачать» и «Скачать и открыть системным плеером» — для любых непроигрываемых форматов
   $('#media-dl').onclick = async () => {
     const f = mp.list[mp.idx]; if (!f) return;
@@ -2551,13 +3247,7 @@ $('#btn-fs-push').onclick = async () => {
   snack('Загружено в ' + fsDir + ': ' + okCount + ' из ' + files.length);
   fsRender();
 };
-$('#btn-fs-mkdir').onclick = async () => {
-  const s = currentSerial(); if (!s) return snack('Нет устройства');
-  const name = await askText('Новая папка', 'Имя новой папки:', '');
-  if (!name) return;
-  await window.api.fsCmd(s, ['mkdir', '-p', fsDir.replace(/\/+$/, '') + '/' + name]);
-  fsRender();
-};
+// v2.8.0: обработчик «Новая папка» перенесён в блок файлового менеджера выше (рядом с «Новый файл»)
 
 /* перетаскивание файлов с ПК прямо в окно — загрузка в ОТКРЫТУЮ папку (F8) */
 (function fsDrop() {
@@ -2701,8 +3391,9 @@ async function procsRender() {
   }).join('') || '<div class="empty">Нет процессов</div>';
   $$('#apps-list [data-kill]').forEach(b => b.onclick = async () => {
     const kn = b.dataset.kname || ('PID ' + b.dataset.kill);
-    const yes = await uiConfirm('Завершить', app_kill_text(kn));
-    if (!yes) return;
+    // v2.8.0: подтверждение с галочкой «Больше не спрашивать» — запоминается навсегда
+    const yes = await confirmOnce('confirm.kill', 'Завершить', app_kill_text(kn) + ' (галочку можно поставить один раз — дальше будет останавливать сразу)');
+    if (!yes || !yes.ok) return;
     b.disabled = true; b.textContent = '…';
     const res = await window.api.procsKill(s, +b.dataset.kill, b.dataset.kname || '');
     if (res.ok) {
@@ -2729,9 +3420,23 @@ async function procsRender() {
     }).catch(() => {});
   }
 }
+// v2.8.0: АВТООБНОВЛЕНИЕ процессов каждые 3 секунды, пока вкладка открыта — запустил приложение
+// на телефоне, и оно САМО появляется в списке (раньше надо было переключать вкладки)
+let procAutoTimer = null;
+let procAutoBusy = false;
+function procAutoStart() {
+  if (procAutoTimer) return;
+  procAutoTimer = setInterval(async () => {
+    if (procAutoBusy || document.hidden) return;
+    if (appsTab !== 'procs' || !$('#page-apps').classList.contains('active')) return;
+    procAutoBusy = true;
+    try { await procsRender(); } catch (e) {}
+    procAutoBusy = false;
+  }, 3000);
+}
 function appsRender() {
   if (!appsData) return;
-  if (appsTab === 'procs') { procsRender(); return; }
+  if (appsTab === 'procs') { procsRender(); procAutoStart(); return; }
   $('#btn-killall-procs').classList.add('hidden');
   const q = ($('#apps-search').value || '').toLowerCase();
   let list;
@@ -2773,10 +3478,16 @@ function appsRender() {
       <span class="avatar" style="background:${avatarColor(p)}" id="av-${esc(p).replace(/[^a-z0-9]/gi, '_')}">${esc(shown.charAt(0).toUpperCase())}</span>
       <span class="grow2 app-line"><span class="app-name">${esc(shown)}</span>${dis ? ' <span class="muted">(отключено)</span>' : ''}${sub && sub !== shown ? '<span class="app-pkg muted small">' + esc(sub) + '</span>' : ''}</span>
       ${sortMetaInfo(p)}
+      ${dis ? '' : '<button class="btn btn-text btn-sm" data-apprun="' + esc(p) + '" data-tip="Запустить приложение на телефоне прямо сейчас">▶</button>'}
       <button class="btn btn-tonal btn-sm" data-appinfo="${esc(p)}">Свойства</button>
     </div>`;
   }).join('') || '<div class="empty">Ничего не найдено</div>';
   $$('#apps-list [data-appinfo]').forEach(b => b.onclick = () => openAppInfo(b.dataset.appinfo));
+  // v2.8.0: «Запустить» прямо из списка — команда уходит на телефон, приложение открывается там
+  $$('#apps-list [data-apprun]').forEach(b => b.onclick = async () => {
+    const r = await window.api.appsRun(currentSerial(), b.dataset.apprun);
+    snack(r.ok ? 'Запущено на телефоне: ' + appDisplay(b.dataset.apprun) : 'Не удалось запустить: ' + (r.message || r.error || ''));
+  });
   queueIcons(list.slice(0, 80));
 }
 // v2.6: при сортировке по размеру/дате показываем значение в строке
@@ -2848,7 +3559,7 @@ $('#btn-killall-procs').onclick = async () => {
   const running = (r1.items || []).map(x => x.name).filter(n => userSet.has(n));
   if (!running.length) return snack('Процессов пользовательских приложений сейчас нет');
   const yes = await uiConfirm('Завершить все приложения', 'Мягко завершить фоновые процессы ' + running.length + ' пользовательских приложений? (am kill — несохранённые данные не страдают, foreground-приложения не трогаем)');
-  if (!yes) return;
+  if (!yes || !yes.ok) return;
   snack('Завершаю ' + running.length + ' приложений…');
   const res = await window.api.procsKillApps(s, running);
   snack('Готово: обработано ' + (res.killed || 0) + ' из ' + (res.total || 0));
@@ -2879,7 +3590,7 @@ $('#debloat-apply').onclick = async () => {
   const sel = $$('#debloat-list [data-deb]:checked').map(c => c.dataset.deb);
   if (!sel.length) return snack('Ничего не выбрано');
   const yes = await uiConfirm('Отключение пакетов', 'Отключить ' + sel.length + ' пакет(ов) для текущего пользователя?');
-  if (!yes) return;
+  if (!yes || !yes.ok) return;
   for (const p of sel) await window.api.appsAction(s, 'removeUser', p);
   closeDlg('dlg-debloat'); snack('Готово: ' + sel.length);
   appsLoad();
@@ -2935,7 +3646,9 @@ async function openAppInfo(pkg) {
   // «Удалить приложение» (полное удаление вместо прежнего загадочного «Удалить (юзер)»)
   $('#appinfo-title').textContent = appDisplay(pkg);
   $('#appinfo-sub').textContent = pkg;
+  // v2.8.0: + «Запустить» — приложение открывается на телефоне немедленно
   $('#appinfo-actions').innerHTML = `
+    ${dis ? '' : '<button class="btn btn-filled btn-sm" data-act="run" data-tip="Запустить приложение на телефоне прямо сейчас">▶ Запустить</button>'}
     <button class="btn btn-tonal btn-sm" data-act="${dis ? 'enable' : 'disable'}" data-tip="${dis ? 'Включить отключённое приложение обратно' : 'Отключить приложение без удаления — его не будет в меню, данные останутся'}">${dis ? 'Включить' : 'Отключить'}</button>
     <button class="btn btn-tonal btn-sm" data-act="clearCache" data-tip="Очистить только кэш приложения, данные и настройки останутся (Android 13+)">Очистить кэш</button>
     <button class="btn btn-tonal btn-sm" data-act="clear" data-tip="Удалить ВСЕ данные приложения: настройки, входы в аккаунты, базы — приложение станет как после установки">Очистить данные</button>
@@ -2945,22 +3658,25 @@ async function openAppInfo(pkg) {
     <button class="btn btn-text btn-sm" data-close="dlg-appinfo">Закрыть</button>`;
   $$('#appinfo-actions [data-act]').forEach(b => b.onclick = async () => {
     const act = b.dataset.act;
+    // v2.8.0: владелец попросил БЕЗ внешних окон: «нажал очистить или удалить — значит сразу
+    // выполняет». Единственное подтверждение, которое осталось — ПОЛНОЕ удаление, и то с
+    // галочкой «Больше не спрашивать» (один раз — дальше сразу).
     const confirmMap = {
-      clear: 'Удалить ВСЕ данные приложения ' + pkg + '? Входы в аккаунты и настройки будут потеряны.',
-      clearCache: 'Очистить кэш приложения ' + pkg + '? (данные не затрагиваются)',
-      uninstall: 'Вы действительно хотите ПОЛНОСТЬЮ УДАЛИТЬ приложение ' + pkg + ' с телефона?',
-      removeUser: 'Удалить приложение ' + pkg + ' для текущего пользователя? (данные останутся, можно восстановить)',
-      disable: 'Отключить приложение ' + pkg + '? Его можно включить обратно.',
-      forceStop: 'Остановить приложение ' + pkg + '?'
+      uninstall: () => confirmOnce('confirm.uninstall', 'Удаление приложения', 'ПОЛНОСТЬЮ удалить приложение ' + pkg + ' с телефона?'),
+      removeUser: () => confirmOnce('confirm.removeUser', 'Удаление приложения', 'Удалить приложение ' + pkg + ' для текущего пользователя? (данные останутся, можно восстановить)')
     };
     if (confirmMap[act]) {
-      const yes = await uiConfirm('Подтвердите действие', confirmMap[act]);
-      if (!yes) return;
+      const yes = await confirmMap[act]();
+      if (!yes || !yes.ok) return;
     }
-    const r = await window.api.appsAction(s, act, pkg);
-    snack(r.ok ? 'Готово' : ('Ошибка: ' + (r.message || r.error || '')));
+    b.disabled = true; b.textContent = '…';
+    let r;
+    if (act === 'run') r = await window.api.appsRun(s, pkg);
+    else r = await window.api.appsAction(s, act, pkg);
+    b.disabled = false; b.textContent = act === 'run' ? '▶ Запустить' : ({ clear: 'Очистить данные', clearCache: 'Очистить кэш', disable: 'Отключить', enable: 'Включить', forceStop: 'Остановить', uninstall: 'Удалить приложение', restore: 'Восстановить', removeUser: 'Удалить (юзер)' }[act] || 'Выполнить');
+    snack(r.ok ? (act === 'run' ? 'Запущено на телефоне' : 'Готово: ' + (act === 'uninstall' ? 'приложение удалено' : '')) : ('Ошибка: ' + (r.message || r.error || '')));
     if (r.ok && (act === 'uninstall' || act === 'removeUser')) { closeDlg('dlg-appinfo'); appsLoad(); return; }
-    if (r.ok && act !== 'clearCache') { closeDlg('dlg-appinfo'); appsLoad(); return; }
+    if (r.ok && act !== 'clearCache' && act !== 'run') { closeDlg('dlg-appinfo'); appsLoad(); return; }
     if (r.ok && act === 'clearCache') openAppInfo(pkg);
   });
   $$('#appinfo-actions [data-close]').forEach(b => b.onclick = () => closeDlg('dlg-appinfo'));
@@ -3097,17 +3813,24 @@ window.api.onTask(async ev => {
     if (ev.stage === 'listening') qrSetStatus(ev.message || 'Ожидание сканирования…', '');
     else if (ev.stage === 'found' || ev.stage === 'paired' || ev.stage === 'connecting') qrSetStatus(ev.message || '…', '');
     else if (ev.stage === 'connected') {
-      qrActive = false;
       qrSetStatus('✓ ' + (ev.message || 'Подключено'), 'ok');
       snd.play('connect');
-      $('#btn-qr-retry').classList.add('hidden');
       state = await window.api.getState();
       renderHistory(); renderFavorites();
       refreshDevices();
-      setTimeout(() => closeDlg('dlg-qrpc'), 1300);
+      setTimeout(qrHidePanel, 1600);
     }
-    else if (ev.stage === 'error') { qrActive = false; qrSetStatus(ev.message || 'Ошибка', 'err'); $('#btn-qr-retry').classList.remove('hidden'); }
+    else if (ev.stage === 'error') { qrActive = false; qrSetStatus(ev.message || 'Ошибка', 'err'); }
     else if (ev.stage === 'cancelled') { qrActive = false; }
+  } else if (ev.kind === 'fs-zip') {
+    // v2.8.0: прогресс сборки ZIP-архива
+    if (ev.stage === 'run' || ev.stage === 'pack' || ev.stage === 'push') {
+      const pct = ev.total ? Math.round((ev.done || 0) / ev.total * 100) : 0;
+      snack('Архив: ' + (ev.msg || ev.stage) + (ev.total ? ' (' + (ev.done || 0) + '/' + ev.total + ')' : ''));
+      void pct;
+    } else if (ev.stage === 'err') snack(ev.msg || 'Часть файлов не вошла в архив', 6000);
+  } else if (ev.kind === 'usb-faketest') {
+    usbFakeEvent(ev);
   } else if (ev.kind === 'mirror-stopped') {
     // генерационная защита: стоп СТАРОЙ сессии не убивает новую (переключение режимов)
     if (mirrorOn && ev.gen === mirrorGen) {

@@ -96,6 +96,23 @@ contextBridge.exposeInMainWorld('api', {
   fsTmpWrite: invoke('fs:tmp-write'),       // v2.7.2: байты → временный локальный файл (HTML-превью)
   fsExtract: invoke('fs:extract'),          // v2.7: распаковка архива в папку с именем архива (свойства файла)
   shellOpenPath: invoke('shell:open-path'), // v2.7: открыть локальный файл системной программой
+  // v2.8.0: файловый менеджер — архивы, категории, DOCX, USB-инструменты
+  fsZipCreate: invoke('fs:zipcreate'),      // собрать ZIP из файлов/папок устройства
+  fsZipList: invoke('fs:ziplist'),          // содержимое ZIP-архива без распаковки
+  fsZipRead: invoke('fs:zipread'),          // прочитать файл ИЗ архива (байты)
+  fsSearch: invoke('fs:search'),            // категории: все фото/музыка/видео/документы
+  fsDocx: invoke('fs:docx'),                // DOCX → HTML для просмотра
+  apkInstalledInfo: invoke('apk:installedinfo'), // установлена ли версия пакета на телефоне
+  apkPhoneInstall: invoke('apk:phoneinstall'),   // установить APK, который уже лежит на телефоне
+  appsRun: invoke('apps:run'),              // запустить установленное приложение на телефоне
+  usbInfo: invoke('usb:info'),
+  usbFormat: invoke('usb:format'),
+  usbLabel: invoke('usb:label'),
+  usbCheck: invoke('usb:check'),
+  usbEject: invoke('usb:eject'),
+  usbFakeTestStart: invoke('usb:faketest-start'),
+  usbFakeTestCancel: invoke('usb:faketest-cancel'),
+  miniClose: () => ipcRenderer.send('mini:close'), // v2.8.0: закрыть мини-окно APK (window.close запрещён в sandbox)
   apkLocalMeta: invoke('apk:localmeta'),    // v2.6: иконка/имя/пакет/версия локального APK
   apkRemoteMeta: invoke('apk:remotemeta'),  // v2.7: иконка/имя APK-файла, лежащего НА ТЕЛЕФОНЕ
   apkInstallBatch: invoke('apk:installbatch'), // v2.6: очередь установки (apk/xapk/apks/obb)

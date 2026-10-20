@@ -32,6 +32,7 @@
     doc: '<path d="M10 5h8l6 6v14.2c0 1-.8 1.8-1.8 1.8H11.8c-1 0-1.8-.8-1.8-1.8V6.8C10 5.8 10.8 5 11.8 5z" fill="#STROKE"/><path d="M13 14h8M13 17h8M13 20h5.5" stroke="#4a5b66" stroke-width="1.7" stroke-linecap="round"/>',
     sheet: '<path d="M10 5h8l6 6v14.2c0 1-.8 1.8-1.8 1.8H11.8c-1 0-1.8-.8-1.8-1.8V6.8C10 5.8 10.8 5 11.8 5z" fill="#STROKE"/><path d="M13 14.5h8M13 17.5h8M13 20.5h8M16.5 14v9M19.5 14v9" stroke="#4a5b66" stroke-width="1.3"/>',
     code: '<path d="M13 11l-4.4 5L13 21M19 11l4.4 5L19 21" stroke="#STROKE" stroke-width="2.2" fill="none" stroke-linecap="round" stroke-linejoin="round"/><path d="M17.2 9.5l-2.4 13" stroke="#STROKE" stroke-width="2" fill="none" stroke-linecap="round"/>',
+    contact: '<rect x="6.5" y="6.5" width="19" height="19" rx="3" fill="#STROKE"/><circle cx="16" cy="13.2" r="2.9" fill="#4a5b66"/><path d="M10.5 22.5c.8-3.2 3-4.9 5.5-4.9s4.7 1.7 5.5 4.9" fill="#4a5b66"/>',
     apk: '<path d="M16 6.5c3.6 0 6.4 2.7 6.5 6.3H9.5c.1-3.6 2.9-6.3 6.5-6.3z" fill="#STROKE"/><path d="M13 4.6l1.2 2.1M19 4.6l-1.2 2.1" stroke="#STROKE" stroke-width="1.6" stroke-linecap="round"/><rect x="9.5" y="14.2" width="13" height="10.5" rx="1.6" fill="#STROKE" opacity=".88"/><circle cx="13.4" cy="11.4" r="1" fill="#4a5b66"/><circle cx="18.6" cy="11.4" r="1" fill="#4a5b66"/>',
     torrent: '<path d="M6.5 18.5c0-4.1 4.3-7.4 9.5-7.4s9.5 3.3 9.5 7.4c0 2.4-1.5 4.5-3.9 5.8H10.4c-2.4-1.3-3.9-3.4-3.9-5.8z" fill="#STROKE"/><path d="M12 17.5h8M12.8 20.5h6.4" stroke="#4a5b66" stroke-width="1.6" stroke-linecap="round"/>',
     iso: '<circle cx="16" cy="16" r="9.5" fill="#STROKE"/><circle cx="16" cy="16" r="3.4" fill="#4a5b66"/><path d="M16 6.5a9.5 9.5 0 0 1 9.5 9.5" stroke="rgba(255,255,255,.55)" stroke-width="2" fill="none"/>',
@@ -61,8 +62,11 @@
     // архивы
     zip: ['#ffa726', 'archive'], rar: ['#ffa726', 'archive'], '7z': ['#ffa726', 'archive'], tar: ['#ffa726', 'archive'],
     gz: ['#ffa726', 'archive'], bz2: ['#ffa726', 'archive'], xz: ['#ffa726', 'archive'], apk: ['#8bc34a', 'apk'],
-    apks: ['#8bc34a', 'apk'], xapk: ['#8bc34a', 'apk'], jar: ['#8bc34a', 'archive'], iso: ['#78909c', 'iso'],
+    apks: ['#8bc34a', 'apk'], xapk: ['#8bc34a', 'apk'], apkm: ['#8bc34a', 'apk'], 'apk.1': ['#8bc34a', 'apk'],
+    'apk+': ['#8bc34a', 'apk'], apup: ['#8bc34a', 'apk'], jar: ['#8bc34a', 'archive'], iso: ['#78909c', 'iso'],
     torrent: ['#43a047', 'torrent'],
+    // контакты
+    vcf: ['#26c6da', 'contact'], vcard: ['#26c6da', 'contact'],
     // документы
     pdf: ['#ef5350', 'pdf'], doc: ['#42a5f5', 'doc'], docx: ['#42a5f5', 'doc'], odt: ['#42a5f5', 'doc'],
     rtf: ['#42a5f5', 'doc'], xls: ['#66bb6a', 'sheet'], xlsx: ['#66bb6a', 'sheet'], csv: ['#66bb6a', 'sheet'],
@@ -102,9 +106,17 @@
         if (!cache.folder) cache.folder = badge(MAP.folder[0], G.folder);
         return { src: cache.folder, color: MAP.folder[0], letter: '' };
       }
-      const ext = String(name || '').match(/\.([a-z0-9]+)$/i);
-      const e = ext ? ext[1].toLowerCase() : '';
-      const def = MAP[e] || ['#8fa3b0', 'generic'];
+      // v2.8.0: сначала пробуем ДВУХЧАСТНЫЕ расширения (apk.1, apk+, apks.zip, tar.gz) —
+      // раньше «app.apk.1» получал иконку «1», а не APK
+      const nm = String(name || '').toLowerCase();
+      const two = nm.match(/\.([a-z0-9]+\.(?:apk|zip|gz|bz2|xz|1))$/);
+      let e = '', def = null;
+      if (two && MAP[two[1]]) { e = two[1]; def = MAP[e]; }
+      if (!def) {
+        const ext = nm.match(/\.([a-z0-9+]+)$/);
+        e = ext ? ext[1] : '';
+        def = MAP[e] || ['#8fa3b0', 'generic'];
+      }
       const key = def[1] + def[0];
       if (!cache[key]) cache[key] = badge(def[0], G[def[1]] || G.generic);
       return { src: cache[key], color: def[0], letter: (e || '?').toUpperCase() };

@@ -215,6 +215,95 @@ function mimeOf(path) {
   return 'image/png';
 }
 
+// --- v2.8.0: АДАПТИВНЫЕ ИКОНКИ (Android 8+, mipmap-anydpi-v26/*.xml) ---
+// У массы приложений (в т.ч. из RuStore/наших локальных APK) растровой иконки нет вовсе —
+// только adaptive-icon XML со ссылками <foreground>/<background>. Прежний код такие APK
+// пропускал («иконки приложений не все показываются»). Разбираем бинарный AXML: находим
+// элемент adaptive-icon, читаем атрибуты ПО ИМЕНИ (не по id — надёжно для любых сборок),
+// ссылки-ресурсы резолвим через resources.arsc в путь растра (png/webp/jpg).
+function adaptiveFromAxml(z, arsc, ax) {
+  if (!ax || ax.readUInt32LE(0) !== 0x00080003) return null;
+  let p = 8;
+  if (ax.readUInt16LE(p) !== 0x0001) return null; // string pool
+  const spChunk = p;
+  const strCount = ax.readUInt32LE(spChunk + 8);
+  const flags = ax.readUInt32LE(spChunk + 16);
+  const stringsOff = ax.readUInt32LE(spChunk + 20);
+  const utf8 = (flags & (1 << 8)) !== 0;
+  const strOffsets = [];
+  for (let i = 0; i < strCount; i++) strOffsets.push(ax.readUInt32LE(spChunk + 28 + i * 4));
+  const absStr = spChunk + stringsOff;
+  const readStr = (i) => {
+    if (i < 0 || i >= strCount) return '';
+    const o = absStr + strOffsets[i];
+    if (o >= ax.length) return '';
+    if (utf8) {
+      const c1 = readVarLen(ax, o);
+      const c2 = readVarLen(ax, o + c1.n);
+      const start = o + c1.n + c2.n;
+      if (start + c2.v > ax.length) return '';
+      return ax.slice(start, start + c2.v).toString('utf8');
+    }
+    let len = ax.readUInt16LE(o);
+    let dataOff = o + 2;
+    if (len & 0x8000) { len = ((len & 0x7fff) << 16) | ax.readUInt16LE(o + 2); dataOff = o + 4; }
+    if (dataOff + len * 2 > ax.length) return '';
+    return ax.slice(dataOff, dataOff + len * 2).toString('utf16le');
+  };
+  // ищем <adaptive-icon> и его атрибуты foreground/background (по имени)
+  const refs = {};
+  let found = false;
+  for (let i = spChunk + ax.readUInt32LE(spChunk + 4); i < ax.length - 20; i += 4) {
+    if (ax.readUInt32LE(i) !== 0x00100102) continue; // START_ELEMENT
+    const elName = readStr(ax.readUInt32LE(i + 20));
+    if (elName !== 'adaptive-icon') continue;
+    found = true;
+    const attrCount = ax.readUInt16LE(i + 26);
+    const A = i + 36;
+    for (let k = 0; k < attrCount; k++) {
+      const base = A + k * 20;
+      const name = readStr(ax.readUInt32LE(base + 4));
+      const valType = ax[base + 15];
+      const valData = ax.readUInt32LE(base + 16);
+      if (name === 'foreground' || name === 'background' || name === 'monochrome') {
+        if (valType === 0x01) refs[name] = valData;           // ссылка на ресурс
+        else if (valType === 0x03) { try { refs[name] = readStr(valData); } catch (e) {} }
+      }
+    }
+    break;
+  }
+  if (!found) return null;
+  for (const key of ['foreground', 'background']) {
+    let path = refs[key];
+    if (path == null) continue;
+    if (typeof path === 'number') {
+      if (!arsc) continue;
+      path = arscResolve(arsc, path);
+      if (!path) continue;
+    }
+    path = String(path).replace(/^@?/, '');
+    if (!/^res\//.test(path)) path = 'res/' + path.replace(/^\//, '');
+    if (/\.xml$/i.test(path)) continue; // вектор — отрисовать нечем
+    const data = zipRead(z, path);
+    if (data && data.length > 32) return { mime: mimeOf(path), data, name: path };
+  }
+  return null;
+}
+function adaptiveIconScan(z, arsc) {
+  // кандидат: любой XML в mipmap/drawable с признаком adaptive (anydpi/v26/v33) или ic_launcher
+  const names = Object.keys(z.entries)
+    .filter(n => /^res\/(?:mipmap|drawable)[^/]*\/[^/]+\.xml$/i.test(n))
+    .filter(n => /anydpi|v26|v33|ic_launcher/i.test(n));
+  for (const n of names) {
+    try {
+      const ax = zipRead(z, n);
+      const ic = ax && adaptiveFromAxml(z, arsc, ax);
+      if (ic) return ic;
+    } catch (e) {}
+  }
+  return null;
+}
+
 // мета APK: иконка + человеческое имя + пакет + версия — ОДНО чтение, четыре результата
 // (v2.6.0: package/versionName нужны новой вкладке «Установка APK» и мини-окну файлов)
 function extractMeta(apkBuf) {
@@ -238,7 +327,22 @@ function extractMeta(apkBuf) {
     if (path && !/\.xml$/i.test(path)) {
       const data = zipRead(z, path);
       if (data && data.length > 32) out.icon = { mime: mimeOf(path), data };
+    } else if (path && /\.xml$/i.test(path)) {
+      // v2.8.0: android:icon указывает на adaptive-icon XML — достаём foreground/background
+      try {
+        const ax2 = zipRead(z, path);
+        const ic = ax2 && adaptiveFromAxml(z, arsc, ax2);
+        if (ic) out.icon = ic;
+      } catch (e) {}
     }
+  }
+  if (!out.icon) {
+    // v2.8.0: adaptive-иконки (anydpi-v26) до растрового фолбэка — иконки есть у тех APK,
+    // где раньше был только робот/буква
+    try {
+      const ad = adaptiveIconScan(z, arsc);
+      if (ad) out.icon = ad;
+    } catch (e) {}
   }
   if (!out.icon) {
     const best = largestRasterIcon(z);

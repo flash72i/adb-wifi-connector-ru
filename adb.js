@@ -286,11 +286,14 @@ function runSync(args, timeoutMs = 8000) {
 function killServer() { return runSync(['kill-server'], 6000); }
 
 // Сканирование диапазона портов беспроводной отладки на одном хосте.
-// v2.7.0: ДОБАВЛЕН режим раннего выхода (opts.early) — как только найден первый открытый
-// порт, ждём graceMs и возвращаем найденное. Причина: полный свип 15 000 портов занимает
-// ~24 с, а порт сопряжения/подключения находится в первой сотне миллисекунд сканирования —
-// из-за этого сопряжение «висело» в фазе «Подключение…» десятки секунд (жалоба v2.6.0).
-function portRangeScan(host, from = 30000, to = 44999, concurrency = 250, timeoutMs = 400, opts = {}) {
+// v2.7.0: режим раннего выхода (opts.early) — как только найден первый открытый порт,
+// ждём graceMs и возвращаем найденное.
+// v2.8.0: КОРРЕКЦИЯ ДИАПАЗОНА — Android выделяет порты беспроводной отладки из ЭФЕМЕРНОГО
+// диапазона Linux 32768–60999; прежний свип 30000–44999 ПРОПУСКАЛ порты 45000–60999,
+// из-за чего на сетях с «резаным» multicast (когда прямой перебор — единственный источник)
+// сопряжение по QR не находило телефон вовсе («QR не работает»). Новый диапазон покрывает
+// весь эфемерный диапазон; ранний выход сохраняет скорость.
+function portRangeScan(host, from = 32768, to = 60999, concurrency = 420, timeoutMs = 320, opts = {}) {
   const early = !!opts.early;
   const graceMs = Math.max(200, opts.graceMs || 900);
   const onFound = typeof opts.onFound === 'function' ? opts.onFound : null;
@@ -331,8 +334,11 @@ function portRangeScan(host, from = 30000, to = 44999, concurrency = 250, timeou
 }
 
 // Быстрый свип: ранний выход после первого найденного порта (v2.7.0 — скорость сопряжения)
+// v2.8.0: диапазон 32768–60999 (см. portRangeScan) + onFound: раньше pairing-порт мог быть
+// найден в середине свипа, а pair по нему начинался только после grace-паузы — теперь main
+// может пробовать каждый найденный порт НЕМЕДЛЕННО (onFound вызывается сразу).
 function portScanFast(host, opts = {}) {
-  return portRangeScan(host, 30000, 44999, 320, 350, Object.assign({ early: true, graceMs: 900 }, opts));
+  return portRangeScan(host, 32768, 60999, 420, 320, Object.assign({ early: true, graceMs: 900 }, opts));
 }
 
 // Быстрый TCP-пробник host:port

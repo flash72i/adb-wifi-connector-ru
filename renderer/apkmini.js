@@ -27,7 +27,13 @@ let installing = false;
 let devices = [];
 
 /* окно: перетаскивание за заголовок + закрытие */
-$('#mini-close').onclick = () => window.close();
+// v2.8.0: window.close() из sandbox-renderer НЕ работает (жалоба: «кнопка закрыть не закрывает,
+// а крестик вверху закрывает») — закрываем через IPC главного процесса
+$('#mini-close').onclick = () => {
+  try { window.api.miniClose(); }
+  catch (e) { try { window.close(); } catch (e2) {} }
+};
+window.addEventListener('keydown', (e) => { if (e.key === 'Escape') $('#mini-close').click(); });
 window.api.onMaximized(() => {});
 
 /* текущий файл: из hash или от main (второй двойной клик по другому APK) */

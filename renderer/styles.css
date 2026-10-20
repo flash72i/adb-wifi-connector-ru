@@ -701,3 +701,82 @@ input[type="range"] { accent-color: var(--accent); }
 /* --- отдельное мини-окно APK --- */
 body.mini-win { overflow: hidden; display: flex; flex-direction: column; }
 body.mini-win #mini-body { flex: 1; }
+
+/* ===================== v2.8.0 ===================== */
+
+/* --- ФИКС «прозрачной щели»: при прокрутке файлах между закреплённым заголовком и
+       закреплённой панелью инструментов ПРОГЛЯДЫВАЛА строка файла. Причины: (1) высота
+       page-head могла превышать 56px, где fs-sticky ещё не приклеился; (2) прозрачные
+       зазоры от margin. Теперь: заголовок ровно 56px с фоном и подложкой-тенью под ним,
+       fs-sticky клеится вплотную (top:55px) и НЕ имеет нижнего margin — сплошное покрытие. */
+#page-files .page-head-sticky {
+  height: 56px; min-height: 56px; overflow: visible;
+  background: var(--bg);
+  box-shadow: 0 10px 0 -6px var(--bg), 0 1px 0 var(--outline);
+}
+#page-files .page-head-sticky h1 { margin: 0; font-size: 19px; line-height: 26px; }
+.fs-sticky {
+  position: sticky; top: 55px; z-index: 8;
+  background: var(--surface);
+  margin: -16px -16px 0;
+  padding: 16px 16px 12px;
+  border-bottom: 1px solid var(--outline);
+  border-radius: var(--radius) var(--radius) 0 0;
+  box-shadow: 0 8px 14px -12px rgba(0,0,0,.55);
+}
+#page-files .page-head { margin-bottom: 10px; }
+#fs-list { margin-top: 10px !important; }
+
+/* --- ПЛАВНЫЙ размер ячеек (ползунок как в Проводнике): --fs-cell ставится из app.js --- */
+#fs-list.fs-grid { grid-template-columns: repeat(auto-fill, minmax(var(--fs-cell, 110px), 1fr)); }
+#fs-list.fs-grid .fs-cell .fs-cell-ico { width: calc(var(--fs-cell, 110px) - 34px); height: calc(var(--fs-cell, 110px) - 34px); max-width: 190px; max-height: 190px; }
+#fs-list.fs-grid .fs-cell-name { max-height: 2.6em; overflow: hidden; }
+
+/* --- инлайн-QR на карточке сопряжения: ~156×149 px, код появляется СРАЗУ под кнопкой --- */
+.qr-inline {
+  display: flex; gap: 14px; align-items: flex-start;
+  margin-top: 12px; padding: 12px;
+  background: var(--surface-2); border: 1px solid var(--outline); border-radius: 14px;
+  max-width: 420px;
+}
+.qr-inline-left { background: #fff; padding: 4px; border-radius: 10px; flex: 0 0 auto; box-shadow: var(--shadow); }
+.qr-inline-left canvas { display: block; width: 156px; height: 149px; }
+.qr-inline-right { min-width: 0; flex: 1; }
+.qr-inline-right .qr-status { text-align: left; font-size: 12.5px; min-height: 34px; }
+.qr-inline-right .qrlog { max-height: 62px; overflow: hidden; font-size: 11px; color: var(--text-2); line-height: 1.45; }
+.qr-inline-right .btn { margin-top: 6px; }
+/* IP сопряжения — по замеру владельца: 190×47 px */
+.pair-ip-field input { width: 190px; height: 47px; }
+
+/* --- контекстное меню файлов (правая кнопка) --- */
+.fs-ctx {
+  position: fixed; z-index: 500; min-width: 240px; max-width: 320px;
+  background: var(--surface); border: 1px solid var(--outline); border-radius: 12px;
+  box-shadow: 0 14px 34px rgba(0,0,0,.45); padding: 6px;
+}
+.fs-ctx-item {
+  display: block; width: 100%; text-align: left; padding: 8px 12px;
+  background: transparent; border: 0; border-radius: 8px; color: var(--text-1);
+  font-size: 13px; cursor: pointer;
+}
+.fs-ctx-item:hover { background: color-mix(in srgb, var(--accent) 14%, var(--surface)); }
+.fs-ctx-item.danger { color: var(--danger); }
+.fs-ctx-sep { height: 1px; background: var(--outline); margin: 5px 8px; }
+
+/* --- панель буфера обмена проводника --- */
+.fs-clipbar {
+  display: flex; align-items: center; gap: 8px; margin-top: 8px;
+  background: color-mix(in srgb, var(--accent) 9%, var(--surface-2));
+  border: 1px dashed color-mix(in srgb, var(--accent) 45%, var(--outline));
+  border-radius: 10px; padding: 7px 10px;
+}
+
+/* --- вкладка APK: сжатая dropzone, когда в списке уже есть файлы --- */
+.dropzone.compact { padding: 12px 16px; font-size: 12.5px; }
+.apkq-msg { max-height: 2.6em; overflow: hidden; }
+
+/* --- подтверждение всегда ПОВЕРХ остальных диалогов (жалоба: уведомление вылезало ЗА окном) --- */
+#dlg-confirm { z-index: 320; }
+
+/* --- выключенный флажок «Больше не спрашивать» скрыт целиком --- */
+#confirm-dontask-row span { font-size: 12.5px; color: var(--text-2); }

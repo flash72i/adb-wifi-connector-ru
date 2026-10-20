@@ -7,6 +7,7 @@ const { app, BrowserWindow, Tray, Menu, ipcMain, nativeImage, dialog, shell } = 
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
+const zlib = require('zlib');   // v2.8.0: сборка ZIP-архивов (fs:zipcreate)
 const { execFile } = require('child_process');
 const adb = require('./adb');
 const mdns = require('./mdns');
@@ -1697,6 +1698,27 @@ function registerIpc() {
     } catch (e) { return { ok: false }; }
   });
 
+  /* ================= v2.8.0: APK НА ТЕЛЕФОНЕ — установлена ли версия + «Установить на телефон» ==== */
+  // Сравнение: versionName/Code УЖЕ УСТАНОВЛЕННОГО пакета (dumpsys package) против версии
+  // из самого APK-файла — владелец видит, какой новее, и ставит одной кнопкой.
+  ipcMain.handle('apk:installedinfo', async (_e, serial, pkg) => {
+    if (!pkg) return { ok: false, error: 'пакет не указан' };
+    const r = await adb.run(['-s', serial, 'shell', 'dumpsys', 'package', String(pkg)], { timeout: 20000 });
+    const t = r.stdout || '';
+    if (!r.ok || !t || /Not installed|No packages/i.test(t.slice(0, 400))) return { ok: true, installed: false };
+    const ver = (t.match(/versionName=([\w.\-]+)/) || [])[1] || '';
+    const code = (t.match(/versionCode=(\d+)/) || [])[1] || '';
+    const first = (t.match(/firstInstallTime=([^\r\n]+)/) || [])[1] || '';
+    return { ok: true, installed: true, versionName: ver, versionCode: code, firstInstall: first.trim() };
+  });
+  ipcMain.handle('apk:phoneinstall', async (e, serial, remoteApk) => {
+    // APK уже лежит НА ТЕЛЕФОНЕ — скачивать не нужно: pm install -r напрямую
+    const r = await adb.run(['-s', serial, 'shell', 'pm', 'install', '-r', adb.shq(remoteApk)], { timeout: 300000 });
+    const ok = r.ok && /success/i.test(r.stdout || '');
+    if (!ok) logErr('apk:phoneinstall', serial, remoteApk, ((r.stdout || '') + ' ' + (r.stderr || '')).slice(0, 160));
+    return { ok, message: ((r.stdout || r.stderr || '').trim().split('\n').pop() || (ok ? 'установлено' : 'ошибка установки')).slice(0, 200) };
+  });
+
   /* ================= v2.6.0: мета локальных APK (иконка/имя/пакет/версия) ================= */
   ipcMain.handle('apk:localmeta', async (_e, filePath) => {
     try {
@@ -1764,6 +1786,488 @@ function registerIpc() {
     return { ok: killed > 0, killed, total: list.length };
   });
 
+  /* ================= v2.8.0: ЗАПУСК УСТАНОВЛЕННОГО ПРИЛОЖЕНИЯ НА ТЕЛЕФОНЕ ================= */
+  ipcMain.handle('apps:run', async (_e, serial, pkg) => {
+    // monkey с LAUNCHER-категорией запускает главное activity пакета — надёжно без знания имени activity
+    const r = await adb.run(['-s', serial, 'shell', 'monkey', '-p', String(pkg), '-c', 'android.intent.category.LAUNCHER', '1'], { timeout: 15000 });
+    const ok = r.ok && !/error|injection/i.test((r.stdout || '') + (r.stderr || ''));
+    if (!ok) logErr('apps:run', pkg, ((r.stdout || '') + ' ' + (r.stderr || '')).slice(0, 150));
+    return { ok, message: (r.stderr || r.stdout || '').trim().split('\n')[0] || (ok ? 'запущено' : 'не удалось запустить') };
+  });
+
+  /* ================= v2.8.0: мини-окно APK — кнопка «Закрыть» (window.close в sandbox запрещён) === */
+  ipcMain.on('mini:close', () => { try { if (miniWin && !miniWin.isDestroyed()) miniWin.close(); } catch (e) {} });
+
+  /* ================= v2.8.0: КАТЕГОРИИ ФАЙЛОВ (все фото/музыка/видео/документы устройства) ======= */
+  // Виртуальная «папка»: find по внутренней памяти собирает файлы данной категории со ВСЕХ
+  // папок (как требуется: «нажму фотографии — покажет все изображения со всего телефона»).
+  const CAT_KINDS = {
+    photo: ['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp', 'heic', 'heif', 'avif', 'dng'],
+    music: ['mp3', 'wav', 'ogg', 'oga', 'flac', 'm4a', 'aac', 'opus', 'wma', 'mid', 'midi', 'amr'],
+    video: ['mp4', 'mkv', 'webm', 'avi', 'mov', '3gp', 'm4v', 'ts', 'wmv', 'flv', 'mpg', 'mpeg'],
+    docs: ['pdf', 'doc', 'docx', 'odt', 'rtf', 'xls', 'xlsx', 'ods', 'ppt', 'pptx', 'txt', 'md', 'csv', 'epub', 'fb2', 'vcf']
+  };
+  ipcMain.handle('fs:search', async (_e, serial, kind, roots) => {
+    const exts = CAT_KINDS[kind];
+    if (!exts) return { ok: false, error: 'Неизвестная категория' };
+    const rootsList = (Array.isArray(roots) && roots.length ? roots : ['/sdcard']).slice(0, 4);
+    const items = [];
+    for (const root of rootsList) {
+      const pat = exts.map(e => '-iname "*.' + e + '"').join(' -o ');
+      // 2>/dev/null: на части каталогов у shell нет доступа — это нормально, пропускаем
+      const r = await adb.run(['-s', serial, 'shell', `find ${adb.shq(root)} -type f \\( ${pat} \\) 2>/dev/null | head -n 4000`], { timeout: 45000 });
+      for (const line of (r.stdout || '').split(/\r?\n/)) {
+        const p = line.trim();
+        if (!p || p.length < 2) continue;
+        const name = p.split('/').pop();
+        if (items.some(x => x.path === p)) continue;
+        items.push({ path: p, name, dir: false, size: 0, date: '' });
+        if (items.length >= 4000) break;
+      }
+      if (items.length >= 4000) break;
+    }
+    return { ok: true, items, kind };
+  });
+
+  /* ================= v2.8.0: СОЗДАНИЕ ZIP-АРХИВА НА УСТРОЙСТВЕ (из файлов/папок) ================= */
+  // Сжимаем НА ПК (zlib) — на телефоне нет zip-создавалки. Файлы тянутся во временную папку,
+  // пакуются и заливаются обратно. Лимит 500 МБ / 4000 файлов — честная ошибка сверх.
+  const CRC_TABLE = (() => {
+    const t = new Uint32Array(256);
+    for (let n = 0; n < 256; n++) {
+      let c = n;
+      for (let k = 0; k < 8; k++) c = (c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1);
+      t[n] = c >>> 0;
+    }
+    return t;
+  })();
+  function crc32(buf) {
+    let c = 0xFFFFFFFF;
+    for (let i = 0; i < buf.length; i++) c = CRC_TABLE[(c ^ buf[i]) & 0xFF] ^ (c >>> 8);
+    return (c ^ 0xFFFFFFFF) >>> 0;
+  }
+  function dosDateTime(d) {
+    const dt = d || new Date();
+    const time = ((dt.getHours() & 31) << 11) | ((dt.getMinutes() & 63) << 5) | ((Math.floor(dt.getSeconds() / 2)) & 31);
+    const date = (((dt.getFullYear() - 1980) & 127) << 9) | (((dt.getMonth() + 1) & 15) << 5) | (dt.getDate() & 31);
+    return { time, date };
+  }
+  function makeZip(entries) {
+    // entries: [{name, data}] → Buffer (deflate; если сжатие не помогает — store)
+    const locals = []; const centrals = []; let offset = 0;
+    for (const ent of entries) {
+      const nameB = Buffer.from(ent.name.replace(/\\/g, '/'), 'utf8');
+      const crc = crc32(ent.data);
+      let method = 8, comp = null;
+      try { comp = zlib.deflateRawSync(ent.data, { level: 6 }); } catch (e) { comp = null; }
+      if (!comp || comp.length >= ent.data.length) { method = 0; comp = ent.data; }
+      const { time, date } = dosDateTime();
+      const lh = Buffer.alloc(30);
+      lh.writeUInt32LE(0x04034b50, 0); lh.writeUInt16LE(20, 4); lh.writeUInt16LE(0, 6);
+      lh.writeUInt16LE(method, 8); lh.writeUInt16LE(time, 10); lh.writeUInt16LE(date, 12);
+      lh.writeUInt32LE(crc, 14); lh.writeUInt32LE(comp.length, 18); lh.writeUInt32LE(ent.data.length, 22);
+      lh.writeUInt16LE(nameB.length, 26); lh.writeUInt16LE(0, 28);
+      locals.push(lh, nameB, comp);
+      const ch = Buffer.alloc(46);
+      ch.writeUInt32LE(0x02014b50, 0); ch.writeUInt16LE(20, 4); ch.writeUInt16LE(20, 6);
+      ch.writeUInt16LE(0, 8); ch.writeUInt16LE(method, 10); ch.writeUInt16LE(time, 12); ch.writeUInt16LE(date, 14);
+      ch.writeUInt32LE(crc, 16); ch.writeUInt32LE(comp.length, 20); ch.writeUInt32LE(ent.data.length, 24);
+      ch.writeUInt16LE(nameB.length, 28); ch.writeUInt16LE(0, 30); ch.writeUInt16LE(0, 32);
+      ch.writeUInt16LE(0, 34); ch.writeUInt16LE(0, 36); ch.writeUInt32LE(0, 38); ch.writeUInt32LE(offset, 42);
+      centrals.push(ch, nameB);
+      offset += 30 + nameB.length + comp.length;
+    }
+    const centralBuf = Buffer.concat(centrals);
+    const eocd = Buffer.alloc(22);
+    eocd.writeUInt32LE(0x06054b50, 0); eocd.writeUInt16LE(0, 4); eocd.writeUInt16LE(0, 6);
+    eocd.writeUInt16LE(entries.length, 8); eocd.writeUInt16LE(entries.length, 10);
+    eocd.writeUInt32LE(centralBuf.length, 12); eocd.writeUInt32LE(offset, 16); eocd.writeUInt16LE(0, 20);
+    return Buffer.concat([...locals, centralBuf, eocd]);
+  }
+  ipcMain.handle('fs:zipcreate', async (e, serial, paths, destZip) => {
+    const send = (stage, msg, done, total) => { try { e.sender.send('task:event', { kind: 'fs-zip', stage, msg, done, total }); } catch (err) {} };
+    try {
+      const list = (Array.isArray(paths) ? paths : []).slice(0, 50);
+      if (!list.length) return { ok: false, error: 'Ничего не выбрано' };
+      const tmpDir = path.join(os.tmpdir(), 'adbwifi-zip-' + Date.now());
+      fs.mkdirSync(tmpDir, { recursive: true });
+      const entries = [];
+      let totalBytes = 0, filesCount = 0;
+      // собираем список файлов
+      for (const p of list) {
+        const st = await adb.run(['-s', serial, 'shell', `stat -c '%F' ${adb.shq(p)}`], { timeout: 15000 });
+        const isDir = /directory/i.test(st.stdout || '');
+        if (!isDir) {
+          entries.push({ remote: p, arcName: path.posix.basename(p.replace(/\\/g, '/')) });
+          filesCount++;
+        } else {
+          const baseName = path.posix.basename(p.replace(/\/+/, ''));
+          const r = await adb.run(['-s', serial, 'shell', `find ${adb.shq(p)} -type f 2>/dev/null | head -n 4000`], { timeout: 60000 });
+          for (const line of (r.stdout || '').split(/\r?\n/)) {
+            const f = line.trim();
+            if (!f) continue;
+            const rel = f.startsWith(p) ? f.slice(p.length).replace(/^\/+/, '') : path.posix.basename(f);
+            entries.push({ remote: f, arcName: baseName + '/' + rel.replace(/\\/g, '/') });
+            filesCount++;
+            if (filesCount > 4000) break;
+          }
+        }
+        if (filesCount > 4000) break;
+      }
+      if (!entries.length) return { ok: false, error: 'В выбранных папках не нашлось файлов' };
+      // тянем и пакуем
+      const zipEntries = [];
+      let done = 0;
+      for (const ent of entries) {
+        if (totalBytes > 500 * 1024 * 1024) { send('err', 'Лимит 500 МБ — архивные файлы сверх не включены', done, entries.length); break; }
+        send('run', path.posix.basename(ent.arcName), done, entries.length);
+        const tmp = path.join(tmpDir, 'f' + done);
+        const pr = await adb.run(['-s', serial, 'pull', ent.remote, tmp], { timeout: 300000 });
+        if (!pr.ok) { done++; continue; }
+        try {
+          const data = fs.readFileSync(tmp);
+          totalBytes += data.length;
+          zipEntries.push({ name: ent.arcName, data });
+        } catch (err) {}
+        try { fs.unlinkSync(tmp); } catch (err) {}
+        done++;
+      }
+      send('pack', 'Собираю архив…', zipEntries.length, entries.length);
+      if (!zipEntries.length) { try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch (err) {} return { ok: false, error: 'Ни один файл не удалось прочитать' }; }
+      const zipBuf = makeZip(zipEntries);
+      const tmpZip = path.join(tmpDir, 'out.zip');
+      fs.writeFileSync(tmpZip, zipBuf);
+      send('push', 'Загружаю архив на устройство…', 1, 1);
+      const dest = String(destZip || '').replace(/\/+$/, '');
+      const push = await adb.run(['-s', serial, 'push', tmpZip, dest], { timeout: 600000 });
+      try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch (err) {}
+      if (!push.ok) return { ok: false, error: 'Архив собран (' + zipEntries.length + ' файлов), но не записан: ' + ((push.stderr || '').slice(0, 120)) };
+      return { ok: true, files: zipEntries.length, bytes: zipBuf.length, dest };
+    } catch (err) { return { ok: false, error: err.message }; }
+  });
+
+  /* ================= v2.8.0: ПРОСМОТР АРХИВА БЕЗ РАСПАКОВКИ (как в Проводнике) ================= */
+  let zipBrowseCache = null; // { key, z } — один активный архив в памяти (LRU-1)
+  async function zipForRead(serial, remote, capMB) {
+    const cap = Math.max(1, parseInt(capMB, 10) || 200) * 1024 * 1024;
+    const st = await adb.run(['-s', serial, 'shell', `stat -c '%s|%Y' ${adb.shq(remote)}`], { timeout: 15000 });
+    const [szs, mts] = ((st.stdout || '').trim().split('|'));
+    const size = parseInt(szs, 10) || 0;
+    const key = remote + '|' + size + '|' + (mts || '');
+    if (zipBrowseCache && zipBrowseCache.key === key) return { ok: true, z: zipBrowseCache.z, size };
+    if (size > cap) return { ok: false, error: 'Архив больше ' + Math.round(cap / 1048576) + ' МБ — скачайте его кнопкой «Скачать»' };
+    const tmp = path.join(os.tmpdir(), 'adbwifi-arcview-' + Date.now() + path.posix.basename(remote).replace(/[^\w.\-]/g, '_'));
+    const pr = await adb.run(['-s', serial, 'pull', remote, tmp], { timeout: 600000 });
+    if (!pr.ok) return { ok: false, error: 'Не удалось скачать архив: ' + ((pr.stderr || '').slice(0, 120)) };
+    try {
+      const buf = fs.readFileSync(tmp);
+      const z = require('./apkicon.js').parseZip(buf);
+      try { fs.unlinkSync(tmp); } catch (err) {}
+      if (!z) return { ok: false, error: 'Архив повреждён или это не ZIP/JAR' };
+      zipBrowseCache = { key, z };
+      return { ok: true, z, size };
+    } catch (err) { try { fs.unlinkSync(tmp); } catch (e2) {} return { ok: false, error: err.message }; }
+  }
+  ipcMain.handle('fs:ziplist', async (_e, serial, remote) => {
+    const r = await zipForRead(serial, remote, 200);
+    if (!r.ok) return r;
+    const z = r.z; const out = [];
+    for (const name of Object.keys(z.entries)) {
+      const en = z.entries[name];
+      // usize берём из central directory (off+24) — дочитывать данные не нужно
+      let usize = 0;
+      try { usize = z.buf.readUInt32LE(en.lh >= 0 ? 0 : 0); } catch (e) {}
+      out.push({ name, dir: name.endsWith('/'), csize: en.csize || 0, usize });
+    }
+    // точные размеры: центральный каталог пройдёмся одним циклом
+    try {
+      let eocd = -1;
+      const b = z.buf;
+      for (let i = b.length - 22; i >= Math.max(0, b.length - 65557); i--) { if (b.readUInt32LE(i) === 0x06054b50) { eocd = i; break; } }
+      if (eocd >= 0) {
+        const count = b.readUInt16LE(eocd + 10);
+        let off = b.readUInt32LE(eocd + 16);
+        const sizeByName = {};
+        for (let i = 0; i < count; i++) {
+          if (b.readUInt32LE(off) !== 0x02014b50) break;
+          const nlen = b.readUInt16LE(off + 28);
+          const name = b.slice(off + 46, off + 46 + nlen).toString('utf8');
+          sizeByName[name] = { usize: b.readUInt32LE(off + 24), method: b.readUInt16LE(off + 10) };
+          off += 46 + nlen + b.readUInt16LE(off + 30) + b.readUInt16LE(off + 32);
+        }
+        for (const it of out) { const s = sizeByName[it.name]; if (s) { it.usize = s.usize; } }
+      }
+    } catch (e) {}
+    out.sort((a, b2) => (a.dir === b2.dir ? a.name.localeCompare(b2.name) : a.dir ? -1 : 1));
+    return { ok: true, entries: out, size: r.size };
+  });
+  ipcMain.handle('fs:zipread', async (_e, serial, remote, entryName) => {
+    const r = await zipForRead(serial, remote, 200);
+    if (!r.ok) return r;
+    const data = require('./apkicon.js').zipRead(r.z, String(entryName));
+    if (!data) return { ok: false, error: 'Не удалось прочитать файл из архива (метод сжатия не поддержан)' };
+    return { ok: true, buf: data, bytes: data.length };
+  });
+
+  /* ================= v2.8.0: ПРОСМОТР DOCX (текст документа прямо в программе) ================= */
+  function xmlDecode(s) {
+    return String(s || '')
+      .replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"')
+      .replace(/&apos;/g, "'").replace(/&#(\d+);/g, (_, d) => String.fromCharCode(+d)).replace(/&amp;/g, '&');
+  }
+  function docxToHtml(buf) {
+    const z = require('./apkicon.js').parseZip(buf);
+    if (!z) return null;
+    const doc = require('./apkicon.js').zipRead(z, 'word/document.xml');
+    if (!doc) return null;
+    const xml = doc.toString('utf8');
+    const body = (xml.match(/<w:body[^>]*>[\s\S]*<\/w:body>/) || [xml])[0];
+    // v2.8.0-fix: разбираем body ПОСЛЕДОВАТЕЛЬНО (таблицы и абзацы в порядке документа) —
+    // прежний вариант через маркеры терял таблицы, стоявшие между абзацами
+    const renderTable = (tbl) => {
+      const rows = [];
+      for (const trM of tbl.matchAll(/<w:tr[ >][\s\S]*?<\/w:tr>/g)) {
+        const cells = [];
+        for (const tcM of trM[0].matchAll(/<w:tc>[\s\S]*?<\/w:tc>/g)) {
+          const texts = [];
+          for (const tM of tcM[0].matchAll(/<w:t[^>]*>([\s\S]*?)<\/w:t>/g)) texts.push(xmlDecode(tM[1]));
+          cells.push('<td>' + texts.join('') + '</td>');
+        }
+        rows.push('<tr>' + cells.join('') + '</tr>');
+      }
+      return '<table class="docx-tbl">' + rows.join('') + '</table>';
+    };
+    const renderPara = (p) => {
+      const runs = [];
+      for (const rM of p.matchAll(/<w:r[ >][\s\S]*?<\/w:r>/g)) {
+        const r = rM[0];
+        let t = '';
+        for (const tM of r.matchAll(/<w:t[^>]*>([\s\S]*?)<\/w:t>/g)) t += xmlDecode(tM[1]);
+        if (/<w:tab\b/.test(r)) t += '\t';
+        if (/<w:br\b/.test(r)) t += '\n';
+        if (!t) continue;
+        const bold = /<w:b\b/.test(r) && !/w:val="0"/.test(r);
+        const ital = /<w:i\b/.test(r) && !/w:val="0"/.test(r);
+        const und = /<w:u\b/.test(r) && !/w:val="none"/.test(r);
+        let html = esc2(t);
+        if (bold) html = '<b>' + html + '</b>';
+        if (ital) html = '<i>' + html + '</i>';
+        if (und) html = '<u>' + html + '</u>';
+        runs.push(html);
+      }
+      if (!runs.length) return '';
+      const text = runs.join('');
+      const hm = p.match(/<w:pStyle w:val="Heading(\d)"/i);
+      if (/<w:numPr>/.test(p)) return '<div class="docx-li">•&nbsp; ' + text + '</div>';
+      if (hm) { const lv = Math.min(4, +hm[1] + 1); return '<h' + lv + '>' + text + '</h' + lv + '>'; }
+      return '<p>' + text + '</p>';
+    };
+    const segRe = /<w:tbl>[\s\S]*?<\/w:tbl>|<w:p[ >][\s\S]*?<\/w:p>/g;
+    const out = [];
+    let mm;
+    while ((mm = segRe.exec(body))) {
+      out.push(mm[0].startsWith('<w:tbl') ? renderTable(mm[0]) : renderPara(mm[0]));
+    }
+    const html = out.join('\n');
+    return html || '<p class="muted">(документ без текста)</p>';
+  }
+  function esc2(s) { return String(s == null ? '' : s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])); }
+  ipcMain.handle('fs:docx', async (_e, serial, remote) => {
+    try {
+      const st = await adb.run(['-s', serial, 'shell', `stat -c %s ${adb.shq(remote)}`], { timeout: 15000 });
+      const size = parseInt((st.stdout || '0').trim(), 10) || 0;
+      if (size > 40 * 1024 * 1024) return { ok: false, error: 'DOCX больше 40 МБ — откройте на компьютере' };
+      const tmp = path.join(os.tmpdir(), 'adbwifi-docx-' + Date.now() + '.docx');
+      const pr = await adb.run(['-s', serial, 'pull', remote, tmp], { timeout: 120000 });
+      if (!pr.ok) return { ok: false, error: 'Не удалось скачать файл: ' + ((pr.stderr || '').slice(0, 120)) };
+      const html = docxToHtml(fs.readFileSync(tmp));
+      try { fs.unlinkSync(tmp); } catch (err) {}
+      if (html == null) return { ok: false, error: 'Это не DOCX (внутри нет word/document.xml)' };
+      return { ok: true, html };
+    } catch (err) { return { ok: false, error: err.message }; }
+  });
+
+  /* ================= v2.8.0: ИНСТРУМЕНТЫ USB/OTG-НАКОПИТЕЛЯ (формат, метка, ошибки, фейк-память) ==== */
+  const usbTest = { running: false, cancel: false };
+  function usbVolId(vol) { return String(vol || '').trim(); }
+  async function smVolumes(serial) {
+    const r = await adb.run(['-s', serial, 'shell', 'sm list-volumes all'], { timeout: 15000 });
+    return (r.stdout || '').split(/\r?\n/).map(l => l.trim()).filter(Boolean);
+  }
+  async function usbMountInfo(serial, vol) {
+    // mounts: /dev/block/vold/public:179,65 /storage/1A2B-3C4D vfat ...
+    const r = await adb.run(['-s', serial, 'shell', 'cat /proc/mounts'], { timeout: 15000 });
+    const lines = (r.stdout || '').split(/\r?\n/);
+    for (const l of lines) {
+      const p = l.split(/\s+/);
+      if (p.length >= 3 && p[1] === '/storage/' + vol) return { dev: p[0], mount: p[1], fstype: p[2], opts: p.slice(3).join(' ') };
+    }
+    return null;
+  }
+  ipcMain.handle('usb:info', async (_e, serial, vol) => {
+    vol = usbVolId(vol);
+    const out = { ok: true, vol };
+    try {
+      const m = await usbMountInfo(serial, vol);
+      if (m) { Object.assign(out, m); out.mounted = true; } else out.mounted = false;
+      const vols = await smVolumes(serial);
+      const line = vols.find(l => l.includes(vol)) || vols.find(l => l.startsWith('public:') && l.includes('mounted'));
+      out.smLine = line || '';
+      if (m) {
+        const df = await adb.run(['-s', serial, 'shell', `df ${adb.shq(m.mount)}`], { timeout: 15000 });
+        const dfl = (df.stdout || '').split(/\r?\n/)[1];
+        if (dfl) { const p = dfl.split(/\s+/); out.total = p[1]; out.used = p[2]; out.free = p[3]; out.totalBytes = (parseInt(p[1], 10) || 0) * 1024; }
+        const lbl = await adb.run(['-s', serial, 'shell', `ls ${adb.shq('/storage')}`], { timeout: 8000 });
+        void lbl;
+      }
+      out.smVolumes = vols;
+    } catch (err) { return { ok: false, error: err.message }; }
+    return out;
+  });
+  ipcMain.handle('usb:format', async (_e, serial, vol, label) => {
+    vol = usbVolId(vol);
+    const warnings = [];
+    try {
+      // 1) стандартный путь Android: sm format <vol-id> (том перезаписывается заводской ФС)
+      const vols = await smVolumes(serial);
+      let target = vols.find(l => l.includes(vol) && /public|private/.test(l));
+      let id = target ? target.split(/\s+/)[0] : null;
+      if (!id) {
+        // id вида public:179,65 иногда надо собрать из disk: `sm list-disks` → adoptable; пробуем public:<vol>
+        id = 'public:' + vol;
+        warnings.push('том в sm list-volumes не найден, пробую public:' + vol);
+      }
+      let r = await adb.run(['-s', serial, 'shell', 'sm format ' + id], { timeout: 120000 });
+      if (!r.ok && /unknown|usage/i.test((r.stderr || '') + (r.stdout || ''))) {
+        r = await adb.run(['-s', serial, 'shell', 'sm format ' + vol], { timeout: 120000 });
+      }
+      if (r.ok) {
+        // 2) метка: newfs_msdos -L (есть не на всех устройствах; форматирование уже сделано sm)
+        if (label) {
+          const m = await usbMountInfo(serial, vol);
+          const dev = m && m.dev;
+          if (dev) {
+            const nf = await adb.run(['-s', serial, 'shell', `newfs_msdos -F 32 -L ${adb.shq(label)} ${adb.shq(dev)}`], { timeout: 120000 });
+            if (!nf.ok) warnings.push('метку задать не удалось (newfs_msdos отсутствует): ' + ((nf.stderr || '').trim().split('\n')[0] || '').slice(0, 100));
+          } else warnings.push('устройство не найдено в /proc/mounts — метку задать не удалось');
+        }
+        return { ok: true, message: 'Форматирование выполнено (sm format)' + (label ? ', метка: ' + label : ''), warnings };
+      }
+      return { ok: false, error: 'sm format не сработал: ' + ((r.stderr || r.stdout || '').trim().split('\n')[0] || 'ошибка').slice(0, 140), warnings };
+    } catch (err) { return { ok: false, error: err.message, warnings }; }
+  });
+  ipcMain.handle('usb:label', async (_e, serial, vol, label) => {
+    vol = usbVolId(vol);
+    try {
+      const m = await usbMountInfo(serial, vol);
+      if (!m) return { ok: false, error: 'Флешка не смонтирована' };
+      const nf = await adb.run(['-s', serial, 'shell', `newfs_msdos -F 32 -L ${adb.shq(label)} ${adb.shq(m.dev)}`], { timeout: 120000 });
+      if (nf.ok) return { ok: true, message: 'Метка изменена на «' + label + '» (ФС пересоздана)' };
+      return { ok: false, error: 'Смена метки требует пересоздания ФС, а newfs_msdos на устройстве нет: ' + ((nf.stderr || '').trim().split('\n')[0] || '').slice(0, 120) };
+    } catch (err) { return { ok: false, error: err.message }; }
+  });
+  ipcMain.handle('usb:check', async (_e, serial, vol) => {
+    vol = usbVolId(vol);
+    const tried = [];
+    try {
+      const m = await usbMountInfo(serial, vol);
+      if (!m) return { ok: false, error: 'Флешка не смонтирована' };
+      const bins = [['fsck_msdos', ['-y']], ['fsck.fat', ['-a', '-w']], ['dosfsck', ['-a']], ['fsck.exfat', ['-y']]];
+      for (const [b, args] of bins) {
+        const r = await adb.run(['-s', serial, 'shell', `command -v ${b} >/dev/null 2>&1 && echo YES`], { timeout: 10000 });
+        if (!/YES/.test(r.stdout || '')) continue;
+        tried.push(b);
+        const f = await adb.run(['-s', serial, 'shell', [b, ...args, adb.shq(m.dev)].join(' ')], { timeout: 300000 });
+        return { ok: true, tool: b, message: ((f.stdout || '') + (f.stderr || '')).trim().slice(0, 600) || (b + ' завершился') };
+      }
+      // фолбэк: перемонтирование — лечит «ФС повреждена» после кэширования/резкого выдёргивания
+      const vols = await smVolumes(serial);
+      const id = (vols.find(l => l.includes(vol)) || '').split(/\s+/)[0];
+      if (id) {
+        await adb.run(['-s', serial, 'shell', 'sm unmount ' + id], { timeout: 60000 });
+        await new Promise(r2 => setTimeout(r2, 1500));
+        const rm = await adb.run(['-s', serial, 'shell', 'sm mount ' + id], { timeout: 60000 });
+        if (rm.ok) return { ok: true, tool: 'remount', message: 'Проверяющих утилит (fsck) на устройстве нет — том ПЕРЕМОНТИРОВАН. Если ошибки остались, переставьте флешку.' };
+      }
+      return { ok: false, error: 'На устройстве нет fsck-утилит и перемонтирование не удалось' };
+    } catch (err) { return { ok: false, error: err.message, tried }; }
+  });
+  ipcMain.handle('usb:eject', async (_e, serial, vol) => {
+    const vols = await smVolumes(serial);
+    const id = (vols.find(l => l.includes(usbVolId(vol))) || '').split(/\s+/)[0];
+    if (!id) return { ok: false, error: 'Том не найден в sm list-volumes' };
+    const r = await adb.run(['-s', serial, 'shell', 'sm unmount ' + id], { timeout: 60000 });
+    return { ok: r.ok, message: r.ok ? 'Флешка безопасно извлечена' : ((r.stderr || r.stdout || '').trim().slice(0, 120)) };
+  });
+  // Проверка на ФЕЙКОВУЮ ПАМЯТЬ (H2testw-метод, без root):
+  //  фаза W — последовательная заливка файлами-блоками с маркером номера блока;
+  //  фаза R — чтение ПЕРВЫХ байт каждого блока: у фейка запись «заворачивается» на начало,
+  //  поэтому в ранних блоках оказываются НОМЕРА ПОЗДНИХ блоков — это и есть доказательство.
+  // Реальный объём ≈ последний корректно прочитанный блок.
+  ipcMain.handle('usb:faketest-start', async (e, serial, vol, blockMB) => {
+    if (usbTest.running) return { ok: false, error: 'Проверка уже идёт' };
+    const m = await usbMountInfo(serial, vol);
+    if (!m) return { ok: false, error: 'Флешка не смонтирована' };
+    const blk = Math.max(16, Math.min(512, parseInt(blockMB, 10) || 64));
+    usbTest.running = true; usbTest.cancel = false;
+    const send = (obj) => { try { e.sender.send('task:event', Object.assign({ kind: 'usb-faketest' }, obj)); } catch (err) {} };
+    (async () => {
+      const mount = m.mount;
+      const dir = mount + '/ADB-FAKETEST-' + Date.now();
+      const count4M = Math.round(blk / 4);
+      const maxBlocks = 4096;
+      let written = 0;
+      try {
+        await adb.run(['-s', serial, 'shell', 'mkdir -p ' + adb.shq(dir)], { timeout: 20000 });
+        send({ stage: 'write', blk, dir });
+        // фаза записи
+        for (let i = 0; i < maxBlocks; i++) {
+          if (usbTest.cancel) { send({ stage: 'canceled', written }); break; }
+          const f = dir + '/p' + String(i).padStart(4, '0');
+          const marker = 'ADBFAKE-' + String(i).padStart(9, '0') + '-HDR';
+          const w = await adb.run(['-s', serial, 'shell',
+            `printf '${marker}' > ${adb.shq(f)} && dd if=/dev/zero bs=4M count=${count4M} >> ${adb.shq(f)} 2>/dev/null`],
+            { timeout: 300000 });
+          if (!w.ok) {
+            // ENOSPC/ошибка записи — конец реального объёма
+            send({ stage: 'wfail', at: i, written });
+            break;
+          }
+          written = i + 1;
+          send({ stage: 'write-progress', done: written, blockBytes: blk * 1024 * 1024 });
+          if (written >= maxBlocks) break;
+        }
+        // фаза чтения заголовков
+        let realBlocks = 0, wrappedAt = -1;
+        send({ stage: 'verify', written });
+        for (let i = 0; i < written; i++) {
+          if (usbTest.cancel) { send({ stage: 'canceled', written }); break; }
+          const f = dir + '/p' + String(i).padStart(4, '0');
+          const rd = await adb.run(['-s', serial, 'shell', `head -c 32 ${adb.shq(f)} 2>/dev/null`], { timeout: 60000 });
+          const head = (rd.stdout || '').trim();
+          const want = 'ADBFAKE-' + String(i).padStart(9, '0') + '-HDR';
+          if (head !== want) {
+            // прочитался ДРУГОЙ блок → память «завернулась» до этого места
+            wrappedAt = i;
+            break;
+          }
+          realBlocks = i + 1;
+          send({ stage: 'verify-progress', done: realBlocks, total: written });
+        }
+        const realBytes = realBlocks * blk * 1024 * 1024;
+        send({ stage: 'done', realBytes, writtenBlocks: written, wrappedAt, blk, canceled: usbTest.cancel });
+      } catch (err) {
+        send({ stage: 'error', error: err.message });
+      } finally {
+        try { await adb.run(['-s', serial, 'shell', 'rm -rf ' + adb.shq(dir)], { timeout: 120000 }); } catch (err) {}
+        usbTest.running = false;
+      }
+    })();
+    return { ok: true, blk };
+  });
+  ipcMain.handle('usb:faketest-cancel', async () => { usbTest.cancel = true; return { ok: true }; });
+
+
   /* ================= v2.6.0: ассоциации файлов APK на уровне системы =================
      v2.7.1: владелец жаловался «ассоциация не работает, должна мгновенно примениться».
      Причины: (1) Проводник не перечитывает ассоциации, пока не скажешь ему SHCNE_ASSOCCHANGED
@@ -1774,13 +2278,19 @@ function registerIpc() {
   const ASSOC_PROGID = 'AdbWifiConnectorRu.APKFile';
   function assocRegArgs(on, exe) {
     const key = 'HKCU\\Software\\Classes\\';
+    // v2.8.0: DefaultIcon указывает на НАСТОЯЩИЙ .ico-файл, а не на «exe,0»:
+    // Проводник часто не мог взять иконку из exe (кэш/права), и .xapk на рабочем столе
+    // оставался с БЕЛЫМ значком. Прямая ссылка на ico-файл надёжнее.
+    const icoFile = path.join(__dirname, 'assets', 'icon.ico');
+    const haveIco = (() => { try { return fs.existsSync(icoFile); } catch (e) { return false; } })();
+    const iconRef = haveIco ? `"${icoFile}"` : `"${exe},0"`;
     const args = [];
     if (on) {
       for (const ext of ASSOC_EXTS) {
         args.push(['add', key + '.' + ext, '/ve', '/t', 'REG_SZ', '/d', ASSOC_PROGID, '/f']);
       }
       args.push(['add', key + ASSOC_PROGID, '/ve', '/t', 'REG_SZ', '/d', 'Установка APK — ADB Wi-Fi Коннектор', '/f']);
-      args.push(['add', key + ASSOC_PROGID + '\\DefaultIcon', '/ve', '/t', 'REG_SZ', '/d', `"${exe},0"`, '/f']);
+      args.push(['add', key + ASSOC_PROGID + '\\DefaultIcon', '/ve', '/t', 'REG_SZ', '/d', iconRef, '/f']);
       args.push(['add', key + ASSOC_PROGID + '\\shell\\open\\command', '/ve', '/t', 'REG_SZ', '/d', `"${exe}" "%1"`, '/f']);
     } else {
       for (const ext of ASSOC_EXTS) args.push(['delete', key + '.' + ext, '/ve', '/f']);
@@ -1822,8 +2332,17 @@ function registerIpc() {
         uc.push(['delete', 'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\FileExts\\.' + ext + '\\UserChoice', '/f']);
       }
       await regBatch(uc);
-      // (2) мгновенное применение: сброс кэша иконок + извещение Проводника о смене ассоциаций
+      // (2) мгновенное применение: ПОЛНЫЙ сброс кэша иконок + извещение Проводника о смене ассоциаций
+      await new Promise((res) => execFile('ie4uinit.exe', ['-ClearIconCache'], { windowsHide: true, timeout: 15000 }, () => res()));
       await new Promise((res) => execFile('ie4uinit.exe', ['-show'], { windowsHide: true }, () => res()));
+      // v2.8.0: дополнительно чистим кэш значков Проводника (iconcache*.db) — иначе белый
+      // значок .xapk на рабочем столе мог держаться до перезагрузки
+      try {
+        const icDir = path.join(app.getPath('appData'), '..', 'Local', 'Microsoft', 'Windows', 'Explorer');
+        for (const f of fs.readdirSync(icDir)) {
+          if (/^iconcache.*\.db$/i.test(f)) { try { fs.unlinkSync(path.join(icDir, f)); } catch (e) {} }
+        }
+      } catch (e) {}
       const ps =
         'Add-Type -Namespace Win32 -Name Sh -MemberDefinition "[DllImport(\'shell32.dll\')] public static extern void SHChangeNotify(int ev, int fl, IntPtr a, IntPtr b);"; ' +
         '[Win32.Sh]::SHChangeNotify(0x08000000, 0, [IntPtr]::Zero, [IntPtr]::Zero)';
@@ -1844,6 +2363,28 @@ function registerIpc() {
     const tmpDir = path.join(os.tmpdir(), 'adbwifi-apk-' + Date.now());
     let installed = 0, failed = 0, canceled = false;
     const send = (obj) => { try { e.sender.send('task:event', Object.assign({ kind: 'apk-queue' }, obj)); } catch (err) {} };
+
+    // v2.8.0: ОДНО подтверждение в программе — и БЕЗ вопросов на самом телефоне.
+    // Причины «каждый APK спрашивает разрешение»: (а) verifier_verify_adb_installs
+    // (Play-защита при установке через adb), (б) на MIUI — adb_install_need_confirm
+    // («Установка через USB»). На время пакета обе настройки выключаем, после — возвращаем
+    // ИСХОДНЫЕ значения, чтобы не менять безопасность устройства навсегда.
+    async function setSoft(what, val) {
+      return adb.run(['-s', serial, 'shell', 'settings', 'put', 'global', what, String(val)], { timeout: 10000 });
+    }
+    async function getSoft(what) {
+      const r = await adb.run(['-s', serial, 'shell', 'settings', 'get', 'global', what], { timeout: 10000 });
+      return (r.stdout || '').trim();
+    }
+    const reverts = [];
+    try {
+      const v0 = await getSoft('verifier_verify_adb_installs');
+      if (v0 !== '0' && v0 !== 'null') { await setSoft('verifier_verify_adb_installs', 0); reverts.push(['verifier_verify_adb_installs', v0]); }
+    } catch (err) {}
+    try {
+      const m0 = await getSoft('adb_install_need_confirm');
+      if (m0 === '1') { await setSoft('adb_install_need_confirm', 0); reverts.push(['adb_install_need_confirm', m0]); }
+    } catch (err) {}
 
     const runInstall = (args) => new Promise((resolve) => {
       const exe = adb.getAdbPath();
@@ -1919,6 +2460,8 @@ function registerIpc() {
       }
     }
     try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch (err) {}
+    // v2.8.0: возвращаем настройки verifier как были (безопасность устройства не меняем навсегда)
+    for (const [what, val] of reverts) { try { await setSoft(what, val); } catch (err) {} }
     return { ok: installed > 0, installed, failed, canceled };
   });
   ipcMain.handle('apk:installcancel', async () => {

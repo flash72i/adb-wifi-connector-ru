@@ -136,12 +136,28 @@ async function run(s, deps) {
     }
   })().catch(() => {}));
   // D: прямое сопряжение по портам известного IP (без mDNS вовсе)
+  // v2.8.0: каждый НАЙДЕННЫЙ порт пробуется НЕМЕДЛЕННО (onFound), не дожидаясь конца свипа —
+  // раньше порт сопряжения мог быть найден в середине перебора, а pair запускался только
+  // после grace-паузы, и на широком диапазоне это съедало секунды. Статусы мгновенные.
   if (s.hintHost) {
     loops.push((async () => {
       const triedPair = new Set();
+      let scanning = false;
       while (!s.cancelled && !target && Date.now() - t0 < LISTEN_TIMEOUT_MS) {
-        const ports = await adb.portScanFast(s.hintHost).catch(() => []);
-        for (const p of (ports || []).slice(0, 6)) {
+        scanning = true;
+        sendStatus('listening', 'Ищу порт сопряжения на ' + s.hintHost + ' (прямой перебор, mDNS не требуется)…');
+        const ports = await adb.portScanFast(s.hintHost, {
+          onFound: (p) => {
+            // мгновенная попытка сопряжения на каждом найденном порту — ещё ДО конца свипа
+            if (target || s.cancelled || triedPair.has(p)) return;
+            triedPair.add(p);
+            adb.pair(s.hintHost, p, s.password).then(pr => {
+              if (pr && pr.ok && !target && !s.cancelled) setTarget({ host: s.hintHost, port: p }, 'direct port pair', true);
+            }).catch(() => {});
+          }
+        }).catch(() => []);
+        scanning = false;
+        for (const p of (ports || []).slice(0, 8)) {
           if (target || s.cancelled) break;
           if (triedPair.has(p)) continue;
           triedPair.add(p);
@@ -149,7 +165,7 @@ async function run(s, deps) {
           const pr = await adb.pair(s.hintHost, p, s.password).catch(() => ({ ok: false }));
           if (pr && pr.ok) { setTarget({ host: s.hintHost, port: p }, 'direct port pair', true); break; }
         }
-        if (!target) await sleep(1600);
+        if (!target) await sleep(scanning ? 300 : 1600);
       }
     })().catch(() => {}));
   }

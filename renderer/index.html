@@ -98,21 +98,42 @@
         <div class="card" id="pair-card">
           <h3>&#128274; Беспроводное сопряжение <span class="muted small">(Android 11+, первый раз)</span></h3>
           <p class="muted small">На телефоне: «Параметры разработчика» → «Беспроводная отладка» →
-          «Сопряжение устройства по коду». Введите показанные адрес и код — или покажите QR-код
-          и отсканируйте его камерой телефона.</p>
+          «Сопряжение устройства по коду». Введите показанные адрес и код — или нажмите «QR-код на телефон»:
+          код появится сразу под кнопкой, наведите камеру телефона.</p>
           <div class="row">
-            <label class="field grow"><span>IP сопряжения</span><input type="text" id="pair-ip" placeholder="192.168.1.6" spellcheck="false"></label>
-            <label class="field w-port"><span>Порт</span><input type="text" id="pair-port" placeholder="37821" spellcheck="false"></label>
-            <label class="field w-code"><span>Код</span><input type="text" id="pair-code" placeholder="123456" spellcheck="false"></label>
+            <label class="field pair-ip-field">
+              <span>IP сопряжения</span>
+              <input type="text" id="pair-ip" placeholder="192.168.1.6" spellcheck="false">
+            </label>
+            <label class="field w-port">
+              <span>Порт</span>
+              <input type="text" id="pair-port" placeholder="37821" spellcheck="false">
+            </label>
+            <label class="field w-code">
+              <span>Код</span>
+              <input type="text" id="pair-code" placeholder="123456" spellcheck="false">
+            </label>
           </div>
           <div class="row" style="margin-top:10px">
-            <button class="btn btn-filled" id="btn-do-pair">Сопрягнуть и подключить</button>
+            <button class="btn btn-filled" id="btn-do-pair">Подключить</button>
             <button class="btn btn-tonal" id="btn-auto-pair" data-tip="Само найдёт порты, сопряжёт и подключит">Автопоиск портов</button>
             <button class="btn btn-tonal" id="btn-find-port" data-tip="Найти открытый порт сопряжения на этом IP">Найти порт</button>
           </div>
           <div class="row" style="margin-top:8px">
-            <button class="btn btn-filled" id="btn-qr-show" data-tip="ПК покажет QR-код: на телефоне откройте «Беспроводная отладка» → «Подключить устройство по QR-коду» и наведите камеру (R2/R4)">&#9641; QR-код на телефон</button>
+            <button class="btn btn-filled" id="btn-qr-show" data-tip="QR-код появится сразу под кнопкой: на телефоне откройте «Беспроводная отладка» → «Подключить устройство по QR-коду» и наведите камеру">&#9641; QR-код на телефон</button>
             <button class="btn btn-text" id="btn-pair-mdns" data-tip="Если сопряжение уже выполнено — найдём телефон по mDNS и подключимся">Найти устройство по mDNS</button>
+          </div>
+          <!-- v2.8.0: QR показывается СРАЗУ здесь (никакого отдельного окна и чёрной заглушки):
+               размер ~156×149 px, шаги подключения — строкой под кодом, мгновенно -->
+          <div class="qr-inline hidden" id="qr-inline">
+            <div class="qr-inline-left">
+              <canvas id="qr-pc-canvas" width="156" height="149"></canvas>
+            </div>
+            <div class="qr-inline-right">
+              <div class="qr-status" id="qr-pc-status">Готовим код…</div>
+              <div class="qrlog" id="qr-pc-log" aria-live="polite"></div>
+              <button class="btn btn-text btn-sm" id="btn-qr-cancel-inline" data-tip="Спрятать код и остановить поиск">Скрыть код</button>
+            </div>
           </div>
           <pre id="pair-log" class="console short" style="margin-top:10px"></pre>
         </div>
@@ -288,28 +309,36 @@
           <button class="btn btn-tonal" id="btn-fs-go">Перейти</button>
           <button class="btn btn-tonal" id="btn-fs-push">Загрузить на телефон</button>
           <button class="btn btn-text" id="btn-fs-mkdir">Новая папка</button>
+          <button class="btn btn-text" id="btn-fs-newfile" data-tip="Создать файл (например текстовый .txt) в открытой папке">Новый файл</button>
         </div>
         <div class="row" style="margin-top:8px">
           <!-- v2.7.1: ОДНА кнопка «Вид» с выпадающим меню, как в Проводнике Windows 11
                (пункты + ползунок размера значков) — вместо трёх отдельных кнопок -->
           <div class="view-dd" id="fs-views">
-            <button class="chip" id="btn-fs-view" data-tip="Вид списка — как в Проводнике Windows: список, значки, огромные значки + ползунок размера">&#9638; Вид: <b id="fs-view-name">Список</b> <span class="view-caret">&#9662;</span></button>
+            <button class="chip" id="btn-fs-view" data-tip="Вид списка — как в Проводнике Windows: список, значки, огромные значки + ПЛАВНЫЙ ползунок размера">&#9638; Вид: <b id="fs-view-name">Список</b> <span class="view-caret">&#9662;</span></button>
             <div class="view-menu hidden" id="fs-view-menu">
               <button class="view-item" data-view="list" data-tip="Список с деталями (размер, дата)"><span class="view-radio"></span>&#9776; Список</button>
               <button class="view-item" data-view="icons" data-tip="Значки среднего размера"><span class="view-radio"></span>&#9638; Значки</button>
               <button class="view-item" data-view="xl" data-tip="Огромные значки с миниатюрами фото"><span class="view-radio"></span>&#9633; Огромные значки</button>
               <div class="view-sep"></div>
-              <div class="view-slider" data-tip="Потяните ползунок, как в Windows 11: список → значки → огромные">
-                <input type="range" id="fs-view-range" min="0" max="2" step="1" value="0">
-                <div class="view-slider-labels"><span>список</span><span>значки</span><span>огромные</span></div>
+              <div class="view-slider" data-tip="Тяните ползунок, как в Проводнике Windows: размер меняется ПЛАВНО, останавливайтесь на любом">
+                <input type="range" id="fs-view-range" min="0" max="100" step="1" value="0">
+                <div class="view-slider-labels"><span>мелко</span><span>средне</span><span>крупно</span></div>
               </div>
             </div>
           </div>
           <span class="grow"></span>
           <input type="text" id="fs-filter" class="input-sm" placeholder="Фильтр по имени…" spellcheck="false">
         </div>
-        <div class="chips" id="fs-quick" data-tip="Быстрые переходы"></div>
+        <div class="chips" id="fs-quick" data-tip="Быстрые переходы и категории (все фото / музыка / видео / документы со всего телефона)"></div>
         <div class="chips" id="fs-volumes" style="margin-top:6px"></div>
+        <!-- v2.8.0: панель буфера обмена (Копировать/Вырезать → Вставить в любую папку, даже на флешку) -->
+        <div class="fs-clipbar hidden" id="fs-clipbar">
+          <span id="fs-cliptext" class="muted small"></span>
+          <span class="grow"></span>
+          <button class="btn btn-tonal btn-sm" id="btn-fs-paste" data-tip="Вставить скопированные/вырезанные файлы в ОТКРЫТУЮ папку">Вставить сюда</button>
+          <button class="btn btn-text btn-sm" id="btn-fs-clipcancel">Отменить</button>
+        </div>
         <div class="muted small" id="fs-storage" style="margin-top:6px"></div>
         </div><!-- /fs-sticky -->
         <div id="fs-list" class="list" style="margin-top:10px"></div>
@@ -470,6 +499,10 @@
   <div class="dialog narrow">
     <div class="dialog-head"><h2 id="confirm-title">Подтвердите действие</h2></div>
     <p id="confirm-body" class="muted"></p>
+    <label class="switch-row hidden" id="confirm-dontask-row" style="cursor:pointer">
+      <span>Больше не спрашивать — выполнять сразу</span>
+      <input type="checkbox" id="confirm-dontask">
+    </label>
     <div class="dialog-foot">
       <button class="btn btn-filled" id="confirm-yes">Выполнить</button>
       <button class="btn btn-text" data-close="dlg-confirm">Отмена</button>
@@ -551,22 +584,88 @@
   </div>
 </div>
 
-<!-- ===== Диалог: подключение по QR-коду (ПК показывает код, телефон сканирует камерой) ===== -->
-<div class="overlay hidden" id="dlg-qrpc">
+<!-- ===== Диалог QR-подключения УДАЛЁН в v2.8.0: QR теперь показывается сразу на карточке
+     сопряжения (панель #qr-inline, ~156×149 px) — без второго клика и без чёрной заглушки ===== -->
+
+<!-- ===== v2.8.0: Диалог — содержимое архива (как в Проводнике: смотреть не распаковывая) ===== -->
+<div class="overlay hidden" id="dlg-arcview">
+  <div class="dialog wide">
+    <div class="dialog-head">
+      <h2 id="arc-title" style="font-size:15px;word-break:break-all">Архив</h2>
+      <button class="dlg-x" data-close="dlg-arcview">&#x2715;</button>
+    </div>
+    <div class="row" style="margin:6px 0 10px">
+      <button class="btn btn-tonal btn-sm" id="btn-arc-extract-all" data-tip="Распаковать весь архив в папку рядом с архивом">Распаковать всё в папку</button>
+      <button class="btn btn-tonal btn-sm" id="btn-arc-extract-sel" data-tip="Извлечь ТОЛЬКО отмеченные файлы в папку архива">Извлечь отмеченные</button>
+      <span class="muted small" id="arc-info"></span>
+    </div>
+    <div class="row" style="margin-bottom:8px">
+      <input type="text" id="arc-filter" class="grow input-sm" placeholder="Фильтр по имени файла в архиве…" spellcheck="false">
+      <span class="muted small">двойной клик — посмотреть файл не распаковывая</span>
+    </div>
+    <div id="arc-list" class="list" style="max-height:46vh;overflow-y:auto"></div>
+  </div>
+</div>
+
+<!-- ===== v2.8.0: Диалог — выбор папки назначения (Переместить в… / Копировать в… / Распаковать в…) ==== -->
+<div class="overlay hidden" id="dlg-fsmove">
   <div class="dialog narrow">
-    <div class="dialog-head"><h2>Подключение по QR-коду</h2><button class="dlg-x" data-close="dlg-qrpc">&#x2715;</button></div>
-    <p class="muted small">На телефоне: <b>Настройки → Для разработчиков → Беспроводная отладка →
-    «Подключить устройство по QR-коду»</b> — откроется камера. Наведите её на QR-код и НЕ закрывайте
-    экран сканера: телефон сопряжётся и подключится автоматически (Android 11+).</p>
-    <div class="qrbox"><canvas id="qr-pc-canvas" width="260" height="260"></canvas></div>
-    <div class="qr-status" id="qr-pc-status">Готовим код…</div>
-    <div class="qrlog" id="qr-pc-log" aria-live="polite"></div>
+    <div class="dialog-head"><h2 id="fsm-title">Переместить в…</h2><button class="dlg-x" data-close="dlg-fsmove">&#x2715;</button></div>
+    <p class="muted small" id="fsm-sub"></p>
+    <div class="row">
+      <input type="text" id="fsm-path" class="grow mono" spellcheck="false" placeholder="/sdcard/Download">
+      <button class="btn btn-text btn-sm" id="btn-fsm-up" data-tip="На уровень вверх">&#8593;</button>
+      <button class="btn btn-text btn-sm" id="btn-fsm-refresh">&#8635;</button>
+    </div>
+    <div id="fsm-list" class="list" style="max-height:38vh;overflow-y:auto;margin-top:8px"></div>
     <div class="dialog-foot">
-      <button class="btn btn-text hidden" id="btn-qr-retry">Другой код</button>
-      <button class="btn btn-tonal" data-close="dlg-qrpc" id="btn-qr-cancel">Отмена</button>
+      <button class="btn btn-filled" id="btn-fsm-ok">СЮДА</button>
+      <button class="btn btn-text" data-close="dlg-fsmove">Отмена</button>
     </div>
   </div>
 </div>
+
+<!-- ===== v2.8.0: Диалог — инструменты USB/OTG-накопителя (формат, метка, ошибки, фейк-память) ==== -->
+<div class="overlay hidden" id="dlg-usbtools">
+  <div class="dialog narrow">
+    <div class="dialog-head"><h2>&#128190; Инструменты флешки</h2><button class="dlg-x" data-close="dlg-usbtools">&#x2715;</button></div>
+    <div class="muted small mono" id="usb-info" style="word-break:break-all">Читаю данные тома…</div>
+    <div class="row" style="margin-top:12px;flex-wrap:wrap">
+      <button class="btn btn-tonal btn-sm" id="btn-usb-refresh">&#8635; Обновить</button>
+      <button class="btn btn-tonal btn-sm" id="btn-usb-check" data-tip="Проверить ФС и постараться ИСПРАВИТЬ без удаления файлов (fsck, если есть на устройстве; иначе — перемонтирование)">Проверить и исправить</button>
+      <button class="btn btn-tonal btn-sm" id="btn-usb-eject" data-tip="Безопасно отключить флешку от телефона">Извлечь</button>
+    </div>
+    <div class="row" style="margin-top:10px;flex-wrap:wrap">
+      <input type="text" id="usb-label" class="input-sm" placeholder="Метка тома" maxlength="11" spellcheck="false">
+      <button class="btn btn-tonal btn-sm" id="btn-usb-label" data-tip="Изменить метку тома (ФС будет пересоздана — данные стираются!)">Сменить метку</button>
+      <button class="btn chip-danger btn-sm" id="btn-usb-format" data-tip="ПОЛНОЕ форматирование флешки (все данные стираются)">Форматировать</button>
+    </div>
+    <div class="card" style="margin-top:12px;background:var(--surface-2)">
+      <b style="font-size:13px">&#128269; Проверка на ФЕЙКОВУЮ память</b>
+      <p class="muted small" style="margin:6px 0">Китайские флешки пишут «32 ГБ», а реальных там 16 — всё, что
+      записано дальше, «заворачивается» и затирает начало. Проверка зальёт флешку блоками с маркерами,
+      прочитает их назад и назовёт РЕАЛЬНЫЙ объём. Занимает минуты — зависит от объёма и скорости.</p>
+      <div class="row">
+        <select id="usb-fake-blk" class="select" data-tip="Размер блока: крупный — быстрее, мелкий — точнее">
+          <option value="512">Грубо (блок 512 МБ — быстро)</option>
+          <option value="64" selected>Стандарт (блок 64 МБ)</option>
+          <option value="16">Точно (блок 16 МБ — медленно)</option>
+        </select>
+        <button class="btn btn-filled btn-sm" id="btn-usb-fake">Проверить память</button>
+        <button class="btn btn-text btn-sm hidden" id="btn-usb-fake-cancel">Остановить</button>
+      </div>
+      <div class="progress hidden" id="usb-fake-progress" style="margin-top:8px"><div class="progress-bar" id="usb-fake-bar"></div></div>
+      <div class="muted small" id="usb-fake-status" style="margin-top:6px;min-height:16px"></div>
+    </div>
+    <pre id="usb-log" class="console short" style="margin-top:10px"></pre>
+    <div class="dialog-foot">
+      <button class="btn btn-text" data-close="dlg-usbtools">Закрыть</button>
+    </div>
+  </div>
+</div>
+
+<!-- ===== v2.8.0: контекстное меню файлов/папок (правая кнопка мыши) ===== -->
+<div id="fs-ctx" class="fs-ctx hidden"></div>
 
 <!-- ===== Диалог: просмотр изображения (v2.6) ===== -->
 <div class="overlay hidden" id="dlg-imgview">
