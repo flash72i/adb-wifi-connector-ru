@@ -278,10 +278,20 @@
           <button class="btn btn-text" id="btn-fs-mkdir">Новая папка</button>
         </div>
         <div class="row" style="margin-top:8px">
-          <div class="chips" id="fs-views" data-tip="Вид списка — как в Проводнике Windows">
-            <button class="chip view-chip active" data-view="list" data-tip="Список с деталями (размер, дата)">☰ Список</button>
-            <button class="chip view-chip" data-view="icons" data-tip="Значки среднего размера">▦ Значки</button>
-            <button class="chip view-chip" data-view="xl" data-tip="Огромные значки с миниатюрами фото">▣ Огромные</button>
+          <!-- v2.7.1: ОДНА кнопка «Вид» с выпадающим меню, как в Проводнике Windows 11
+               (пункты + ползунок размера значков) — вместо трёх отдельных кнопок -->
+          <div class="view-dd" id="fs-views">
+            <button class="chip" id="btn-fs-view" data-tip="Вид списка — как в Проводнике Windows: список, значки, огромные значки + ползунок размера">&#9638; Вид: <b id="fs-view-name">Список</b> <span class="view-caret">&#9662;</span></button>
+            <div class="view-menu hidden" id="fs-view-menu">
+              <button class="view-item" data-view="list" data-tip="Список с деталями (размер, дата)"><span class="view-radio"></span>&#9776; Список</button>
+              <button class="view-item" data-view="icons" data-tip="Значки среднего размера"><span class="view-radio"></span>&#9638; Значки</button>
+              <button class="view-item" data-view="xl" data-tip="Огромные значки с миниатюрами фото"><span class="view-radio"></span>&#9633; Огромные значки</button>
+              <div class="view-sep"></div>
+              <div class="view-slider" data-tip="Потяните ползунок, как в Windows 11: список → значки → огромные">
+                <input type="range" id="fs-view-range" min="0" max="2" step="1" value="0">
+                <div class="view-slider-labels"><span>список</span><span>значки</span><span>огромные</span></div>
+              </div>
+            </div>
           </div>
           <span class="grow"></span>
           <input type="text" id="fs-filter" class="input-sm" placeholder="Фильтр по имени…" spellcheck="false">

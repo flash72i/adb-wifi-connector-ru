@@ -470,15 +470,16 @@ async function doConnect(host, port) {
   snack('Подключение к ' + host + ':' + port + '…');
   const r = await window.api.adbConnect(host, +port);
   if (r.ok) {
-    snack('Подключено: ' + host + ':' + port);
+    // v2.7.1: main может «самоисцелиться» — найти живой порт, если введённый закрыт
+    const hp = r.host ? r.host : host, hport = r.port ? r.port : port;
+    snack(r.healed ? (r.message || 'Подключено через другой порт') : 'Подключено: ' + hp + ':' + hport);
     state = await window.api.getState();
-    const ser = host + ':' + port;
-    setActive(ser);
+    setActive(hp + ':' + hport);
     renderHistory(); renderFavorites();
     refreshDevices();
     snd.play('connect');
   } else {
-    snack('Не удалось подключиться: ' + (r.message || r.error || 'ошибка'));
+    snack('Не удалось подключиться: ' + (r.message || r.error || 'ошибка'), 7000);
   }
 }
 
@@ -976,6 +977,12 @@ let mirrorCarry = new Uint8Array(0);
 let mirrorSPS = null, mirrorPPS = null, mirrorDev = null, mirrorWaitingKey = false;
 let mirrorFrames = 0, mirrorFpsLast = 0, mirrorFpsTimer = null, mirrorJpegSeq = 0;
 let mirrorStallHandled = false, mirrorBlackRun = 0, mirrorGen = 0;
+// v2.7.1: лестница декодера — жалоба «данные идут, но ни одного кадра не выдано»: на части
+// машин аппаратный декодер WebCodecs молча не выдаёт кадры. Раньше мы сразу уезжали в
+// снимки экрана; теперь пробуем ступени: 0 — avcC (как было), 1 — Annex-B без description,
+// 2 — Annex-B + ПРОГРАММНОЕ декодирование (работает везде), и лишь потом — простой режим.
+let mirrorDecStage = 0, mirrorQueued = 0, mirrorFirstQueueAt = 0;
+const SC4 = new Uint8Array([0, 0, 0, 1]);
 // вотчдог «данные идут, а кадров нет»: реальный кейс владельца — декодер сконфигурирован,
 // байты капают, но ни один кадр так и не выдан → вечный чёрный экран (F15)
 let mirrorLastChunkAt = 0, mirrorLastFrameAt = 0;
@@ -1008,12 +1015,29 @@ function mirrorFpsTick() {
   const modeTxt = mirrorMode === 'jpeg' ? 'снимки' : 'h264 · 8 Мбит/с';
   const q = (mirrorDec && mirrorDec.decodeQueueSize) || 0;
   mirrorFpsLabel((fps >= 0 ? fps : 0) + ' к/с · ' + c.width + '×' + c.height + ' · ' + modeTxt + (q > 8 ? ' · буфер ' + q : ''));
-  // F15: поток живой (байты капают), но кадров нет уже 6 с — декодер «молча» съел поток →
-  // уходим в простой режим сами, не дожидаясь, пока владелец устанёт смотреть в чёрный экран
-  if (mirrorMode === 'h264' && mirrorLastChunkAt && now - mirrorLastChunkAt < 3000 &&
-      mirrorLastFrameAt && now - mirrorLastFrameAt > 6000 && !mirrorFrames) {
-    scheduleFallback('данные идут, но ни одного кадра не выдано');
+  // F15/v2.7.1: поток живой (байты капают), а кадров нет → сначала пробуем ДРУГИЕ способы
+  // декодирования (Annex-B → программный декодер, каждый раз со свежим потоком), и только
+  // после них — снимки экрана. В v2.7.0 сразу включался простой режим — выглядело как «сломалось».
+  if (mirrorMode === 'h264' && mirrorLastChunkAt && now - mirrorLastChunkAt < 3000 && !mirrorFrames) {
+    if (mirrorQueued > 0 && mirrorFirstQueueAt && now - mirrorFirstQueueAt > 2200) mirrorEscalate();
+    else if (mirrorLastFrameAt && now - mirrorLastFrameAt > 6000 && !mirrorQueued) {
+      scheduleFallback('данные идут, но декодер так и не принял поток');
+    }
   }
+}
+function mirrorEscalate() {
+  if (!mirrorOn || mirrorMode !== 'h264' || mirrorStallHandled) return;
+  if (mirrorDecStage >= 2) { scheduleFallback('декодер так и не выдал кадр (проверены Annex-B и программное декодирование)'); return; }
+  mirrorDecStage++;
+  mirrorDecClose();
+  mirrorSPS = mirrorPPS = null;   // реконфиг из СВЕЖЕГО потока после bounce
+  mirrorWaitingKey = true;
+  mirrorCarry = new Uint8Array(0);
+  mirrorQueued = 0; mirrorFirstQueueAt = 0;
+  const how = mirrorDecStage === 1 ? 'Annex-B' : 'программный декодер';
+  $('#mirror-status').textContent = 'Кадров нет — переключаю способ декодирования (' + how + ')…';
+  snack('Видео не декодируется — пробую другой способ (' + how + ')…');
+  window.api.mirrorBounce().catch(() => {}); // свежий SPS/PPS/IDR для нового декодера
 }
 
 function mirrorFeed(buf) {
@@ -1084,8 +1108,19 @@ function mirrorFeed(buf) {
       const avcc = new Uint8Array(4 + nal.length);
       new DataView(avcc.buffer).setUint32(0, nal.length);
       avcc.set(nal, 4);
+      let chunkData = avcc;
+      // v2.7.1: на ступенях 1/2 кормим декодер чистым Annex-B; ключевой кадр несёт SPS+PPS с собой
+      if (mirrorDecStage >= 1) {
+        const segs = (type === 5 && mirrorSPS && mirrorPPS) ? [SC4, mirrorSPS, SC4, mirrorPPS] : [];
+        segs.push(SC4, nal);
+        let total = 0; for (const s of segs) total += s.length;
+        chunkData = new Uint8Array(total);
+        let off = 0; for (const s of segs) { chunkData.set(s, off); off += s.length; }
+      }
+      if (!mirrorFirstQueueAt) mirrorFirstQueueAt = Date.now();
+      mirrorQueued++;
       try {
-        mirrorDec.decode(new EncodedVideoChunk({ type: type === 5 ? 'key' : 'delta', timestamp: mirrorPts += 33000, data: avcc }));
+        mirrorDec.decode(new EncodedVideoChunk({ type: type === 5 ? 'key' : 'delta', timestamp: mirrorPts += 33000, data: chunkData }));
       } catch (e) {}
     }
   }
@@ -1107,8 +1142,13 @@ function mirrorInitDecoder() {
     error: (e) => { $('#mirror-status').textContent = 'Ошибка декодера: ' + e.message; scheduleFallback('ошибка декодера'); }
   });
   try {
-    mirrorDec.configure({ codec, description: avccConfig(mirrorSPS, mirrorPPS), optimizeForLatency: true });
-    $('#mirror-status').textContent = 'Трансляция идёт (кодек ' + codec + ')';
+    // v2.7.1: ступени декодера (см. mirrorDecStage): 0 — avcC, 1 — Annex-B, 2 — Annex-B + software
+    const cfg = { codec, optimizeForLatency: true };
+    if (mirrorDecStage === 0) cfg.description = avccConfig(mirrorSPS, mirrorPPS);
+    else cfg.hardwareAcceleration = mirrorDecStage === 2 ? 'prefer-software' : 'no-preference';
+    mirrorDec.configure(cfg);
+    $('#mirror-status').textContent = 'Трансляция идёт (кодек ' + codec +
+      (mirrorDecStage === 1 ? ' · Annex-B' : mirrorDecStage === 2 ? ' · программный декодер' : '') + ')';
   } catch (e) { $('#mirror-status').textContent = 'Не удалось настроить декодер: ' + e.message; scheduleFallback('декодер не настроился'); }
 }
 // «чёрный экран» детектим сам: 3 кадра подряд почти чёрные → просим простой режим (A3-ревью)
@@ -1164,6 +1204,7 @@ async function startMirror(serial, mode) {
   mirrorOn = true; mirrorSPS = mirrorPPS = null; mirrorPts = 0; mirrorCarry = new Uint8Array(0);
   mirrorWaitingKey = false; mirrorStallHandled = false; mirrorBlackRun = 0;
   mirrorFrames = 0; mirrorFpsLast = 0; mirrorJpegSeq = 0;
+  mirrorDecStage = 0; mirrorQueued = 0; mirrorFirstQueueAt = 0;
   mirrorLastChunkAt = 0; mirrorLastFrameAt = 0;
   mirrorDecClose();
   // сбрасываем канвас: кадр прошлой сессии/устройства не должен выдаваться за новый
@@ -1393,13 +1434,20 @@ $('#btn-diag').onclick = async () => {
   const s = currentSerial();
   $('#diag-report').innerHTML = '<div class="muted">Выполняется…</div>';
   const rep = await window.api.toolDiagnostics(s);
+  // v2.7.1: КОМПАКТНО и без вылезания за экран: сетка в 2 колонки, каждая строка — отдельный
+  // div с переносом длинных слов (в v2.7.0 <pre> не переносил длинные mDNS-имена — строка
+  // уезжала за границу окна); рекомендации — обычным списком, тоже с переносом.
   // v2.7.0: три состояния — ок (зелёный), предупреждение (жёлтый), ошибка (красный)
   const ico = sec => sec.ok
-    ? (sec.warn ? '<span class="d-warn">&#9888;</span>' : '<span style="color:var(--ok)">&#10004;</span>')
-    : '<span style="color:var(--warn)">&#10008;</span>';
+    ? (sec.warn ? '<span class="d-warn">&#9888;</span>' : '<span class="d-ok">&#10004;</span>')
+    : '<span class="d-err">&#10008;</span>';
   $('#diag-report').innerHTML =
-    rep.sections.map(sec => `<div class="diag-sec"><b>${ico(sec)} ${esc(sec.title)}</b><pre>${esc(sec.lines.join('\n'))}</pre></div>`).join('') +
-    (rep.suggestions.length ? `<div class="diag-sugg"><b>Рекомендации</b><pre>${esc(rep.suggestions.map(x => '• ' + x).join('\n'))}</pre></div>` : '');
+    '<div class="diag-grid">' +
+    rep.sections.map(sec => `<div class="diag-sec ${sec.ok ? (sec.warn ? 'is-warn' : 'is-ok') : 'is-err'}">` +
+      `<b>${ico(sec)} ${esc(sec.title)}</b>` +
+      `<div class="diag-lines">${sec.lines.map(l => '<div class="diag-line">' + esc(l) + '</div>').join('')}</div></div>`).join('') +
+    '</div>' +
+    (rep.suggestions.length ? `<div class="diag-sugg"><b>Рекомендации</b><ul class="diag-sugg-list">${rep.suggestions.map(x => '<li>' + esc(x) + '</li>').join('')}</ul></div>` : '');
 };
 
 /* ---------- файловый менеджер: файлы видны СРАЗУ (R11); v2.5.0 — F4–F8 ---------- */
@@ -1435,17 +1483,36 @@ function renderFsQuick() {
   box.innerHTML = FS_QUICK.map(q => `<button class="chip" data-qdir="${esc(q.dir)}">${esc(q.label)}</button>`).join('');
   box.querySelectorAll('[data-qdir]').forEach(b => b.onclick = () => fsNavigate(b.dataset.qdir));
 }
-// v2.7.0: переключатель вида (список / значки / огромные) — как в Проводнике Windows;
-// выбор запоминается и применяется сразу (перерисовка текущей папки)
-$$('#fs-views .view-chip').forEach(c => c.onclick = () => {
-  fsView = c.dataset.view;
+// v2.7.1: ОДНА кнопка «Вид» с выпадающим меню как в Проводнике Windows 11 — пункты + ползунок
+// размера значков. ВАЖНО: в v2.7.0 здесь был crash-баг всего приложения: IIFE syncFsViewChips
+// читала let fsView ДО его объявления (TDZ ReferenceError) — app.js умирал на этой строке,
+// и ВСЁ, что объявлено ниже, оставалось неинициализированным: не работали файлы, приложения,
+// ассоциации, плеер, половина кнопок. Теперь fsView объявлен ЗДЕСЬ, выше использования.
+const VIEW_ORDER = ['list', 'icons', 'xl'];
+const VIEW_NAMES = { list: 'Список', icons: 'Значки', xl: 'Огромные' };
+let fsView = 'list';
+try { fsView = localStorage.getItem('fs.view') || 'list'; } catch (e) {}
+if (!VIEW_ORDER.includes(fsView)) fsView = 'list';
+function syncFsViewUI() {
+  const name = $('#fs-view-name'); if (name) name.textContent = VIEW_NAMES[fsView];
+  $$('#fs-view-menu .view-item').forEach(x => x.classList.toggle('active', x.dataset.view === fsView));
+  const r = $('#fs-view-range'); if (r) r.value = String(VIEW_ORDER.indexOf(fsView));
+}
+function setFsView(v) {
+  fsView = VIEW_ORDER.includes(v) ? v : 'list';
   try { localStorage.setItem('fs.view', fsView); } catch (e) {}
-  $$('#fs-views .view-chip').forEach(x => x.classList.toggle('active', x === c));
+  syncFsViewUI();
   fsRender();
-});
-(function syncFsViewChips() {
-  $$('#fs-views .view-chip').forEach(x => x.classList.toggle('active', x.dataset.view === fsView));
+}
+syncFsViewUI();
+$('#btn-fs-view').onclick = (e) => { e.stopPropagation(); $('#fs-view-menu').classList.toggle('hidden'); };
+$$('#fs-view-menu .view-item').forEach(c => c.onclick = () => { setFsView(c.dataset.view); $('#fs-view-menu').classList.add('hidden'); });
+(function viewSlider() {
+  const r = $('#fs-view-range');
+  let deb = null;
+  r.addEventListener('input', () => { clearTimeout(deb); deb = setTimeout(() => setFsView(VIEW_ORDER[+r.value]), 130); });
 })();
+document.addEventListener('click', (e) => { const m = $('#fs-view-menu'); if (m && !e.target.closest('#fs-views')) m.classList.add('hidden'); });
 
 // навигация С историей: кнопка «Назад» возвращает на предыдущую папку (F5)
 function fsNavigate(newDir, { back } = {}) {
@@ -1479,9 +1546,7 @@ const PDF_RE = /\.pdf$/i;
 const HTML_RE = /\.(html?|xhtml)$/i;
 const ARC_RE = /\.(zip|jar|tar|tar\.gz|tgz|tar\.bz2|tbz2|tar\.xz|rar|7z)$/i;
 const APK_RE = /\.(apk|apks|xapk|apkm)$/i;
-// v2.7.0: вид списка файлов (как в Проводнике): list | icons | xl — запоминаем между запусками
-let fsView = 'list';
-try { fsView = localStorage.getItem('fs.view') || 'list'; } catch (e) {}
+// v2.7.1: fsView объявлен и инициализирован ВЫШЕ (блок кнопки «Вид») — здесь больше не дублируется
 const thumbCache = new Map();     // путь → dataURL (миниатюры фото в режиме значков)
 const thumbFail = new Set();
 let thumbQueue = [], thumbRun = 0;
@@ -1497,11 +1562,13 @@ function pumpThumbs() {
 }
 async function loadThumb(job) {
   const { path: p, el } = job;
-  if (thumbCache.has(p)) { el.src = thumbCache.get(p); return; }
+  if (thumbCache.has(p)) { if (el && el.isConnected) el.src = thumbCache.get(p); return; }
   if (thumbFail.has(p)) return;
   const s = currentSerial(); if (!s) return;
   try {
     const r = await window.api.fsCat(s, p, 12);
+    // v2.7.1: элемент мог уйти (переход в другую папку) — чужой src не трогаем
+    if (!el || !el.isConnected || el.dataset.path !== p) return;
     if (!r.ok || !r.buf || !r.buf.length) { thumbFail.add(p); return; }
     const blob = new Blob([r.buf], { type: /jpe?g$/i.test(p) ? 'image/jpeg' : /png$/i.test(p) ? 'image/png' : /gif$/i.test(p) ? 'image/gif' : /webp$/i.test(p) ? 'image/webp' : /bmp$/i.test(p) ? 'image/bmp' : 'image/jpeg' });
     const url = URL.createObjectURL(blob);
@@ -1523,10 +1590,11 @@ function pumpFsApkIcons() {
       const s = currentSerial(); if (!s) return;
       const r = await window.api.apkRemoteMeta(s, job.path).catch(() => null);
       fsApkIconDone.add(job.path);
-      if (r && r.ok && r.dataUrl) {
-        const img = document.getElementById(job.id);
-        if (img) { img.src = r.dataUrl; const b = document.getElementById(job.id + '-badge'); if (b) b.style.display = 'block'; }
-        if (r.label) { const t = document.getElementById(job.id + '-name'); if (t) t.textContent = r.label + ' (' + job.name + ')'; }
+      // v2.7.1: защита от «переехавшей» папки: обновляем элемент ТОЛЬКО если это тот же файл
+      const img = document.getElementById(job.id);
+      if (r && r.ok && r.dataUrl && img && img.dataset.path === job.path && img.isConnected) {
+        img.src = r.dataUrl; const b = document.getElementById(job.id + '-badge'); if (b) b.style.display = 'block';
+        if (r.label) { const t = document.getElementById(job.id + '-name'); if (t && t.dataset.path === job.path) t.textContent = r.label + ' (' + job.name + ')'; }
       }
     })().finally(() => { fsApkRun--; pumpFsApkIcons(); });
   }
@@ -1537,6 +1605,11 @@ function fsBadgeHtml(isApk) {
 }
 async function fsRender() {
   const seq = ++fsSeq;
+  // v2.7.1: сбрасываем очереди миниатюр/иконок ПРОШЛОЙ папки — иначе догоняющие задачи
+  // занимали канал и (для APK-иконок, поиск по индексному id) рисовали иконки/имена
+  // из ПРЕДЫДУЩЕЙ папки в текущей («перешёл в другую папку — а там как было»)
+  thumbQueue.length = 0;
+  fsApkQueue.length = 0;
   const s = currentSerial();
   const box = $('#fs-list');
   const empty = $('#fs-empty');
@@ -1636,8 +1709,8 @@ async function fsRender() {
       const media = !it.dir && (IMG_RE.test(it.name) || VID_RE.test(it.name) || AUD_RE.test(it.name));
       if (isApk) apkJobs.push({ path: full(it.name), name: it.name, id: 'fsapk-' + i });
       return `<div class="list-row fs-row">
-      <span class="fs-ico-wrap"><img class="fs-ico" src="${ic.src}" alt="" data-fsopen-i="${i}" id="fsapk-${i}">${fsBadgeHtml(isApk)}</span>
-      <span class="mono grow2 fs-name" data-fsopen="${esc(it.name)}" data-isdir="${it.dir ? 1 : 0}" data-fs-i="${i}" style="cursor:pointer" data-tip="${it.dir ? 'Открыть папку' : (media ? 'Открыть в просмотрщике/плеере' : 'Двойной клик — свойства')}">${esc(it.name)}</span>
+      <span class="fs-ico-wrap"><img class="fs-ico" src="${ic.src}" alt="" data-fsopen-i="${i}" id="fsapk-${i}" data-path="${esc(full(it.name))}">${fsBadgeHtml(isApk)}</span>
+      <span class="mono grow2 fs-name" data-fsopen="${esc(it.name)}" data-isdir="${it.dir ? 1 : 0}" data-fs-i="${i}" style="cursor:pointer" id="fsapk-${i}-name" data-path="${esc(full(it.name))}" data-tip="${it.dir ? 'Открыть папку' : (media ? 'Открыть в просмотрщике/плеере' : 'Двойной клик — свойства')}">${esc(it.name)}</span>
       <span class="muted fs-size">${it.dir ? '' : fmtBytes(it.size)}</span>
       <span class="muted fs-date">${esc(it.date || '')}</span>
       <button class="btn btn-text btn-sm" data-fsprop="${esc(it.name)}" data-isdir="${it.dir ? 1 : 0}" data-tip="Свойства: размер, дата, права доступа, содержимое">Свойства</button>
@@ -1660,9 +1733,9 @@ async function fsRender() {
       if (isApk) apkJobs.push({ path: full(it.name), name: it.name, id: xl ? 'fscell-' + i : 'fscell-s-' + i });
       return `<div class="fs-cell" data-fsopen="${esc(it.name)}" data-isdir="${it.dir ? 1 : 0}" data-fs-i="${i}" data-tip="${it.dir ? 'Открыть папку' : 'Клик — открыть, кнопки ниже — действия'}">
       ${isImg && xl
-        ? '<img class="fs-cell-ico" id="fscell-' + i + '" src="' + ic.src + '" alt="">'
-        : '<span style="position:relative;display:inline-block"><img class="fs-cell-ico" id="' + (xl ? 'fscell-' + i : 'fscell-s-' + i) + '" src="' + ic.src + '" alt="">' + fsBadgeHtml(isApk) + '</span>'}
-      <span class="fs-cell-name" id="${(xl ? 'fscell-' : 'fscell-s-') + i}-name">${esc(it.name)}</span>
+        ? '<img class="fs-cell-ico" id="fscell-' + i + '" src="' + ic.src + '" alt="" data-path="' + esc(full(it.name)) + '">'
+        : '<span style="position:relative;display:inline-block"><img class="fs-cell-ico" id="' + (xl ? 'fscell-' + i : 'fscell-s-' + i) + '" src="' + ic.src + '" alt="" data-path="' + esc(full(it.name)) + '">' + fsBadgeHtml(isApk) + '</span>'}
+      <span class="fs-cell-name" id="${(xl ? 'fscell-' : 'fscell-s-') + i}-name" data-path="${esc(full(it.name))}">${esc(it.name)}</span>
       <span class="fs-cell-sub">${it.dir ? 'папка' : fmtBytes(it.size) + (isVid ? ' · видео' : isApk ? ' · приложение' : '')}</span>
       <span class="fs-cell-actions" data-fs-i="${i}">
         <button class="btn btn-text btn-sm" data-fsprop="${esc(it.name)}" data-isdir="${it.dir ? 1 : 0}" data-tip="Свойства">ℹ</button>
@@ -1678,7 +1751,7 @@ async function fsRender() {
     for (const j of thumbJobs) { const el = document.getElementById(j.id); if (el) { j.el = el; queueThumbs([j]); } }
   }
   if (apkJobs.length) {
-    for (const j of apkJobs) { const el = document.getElementById(j.id); if (el) queueFsApkIcons([{ ...j, id: el.id }]); }
+    for (const j of apkJobs) { const el = document.getElementById(j.id); if (el && el.dataset.path === j.path) queueFsApkIcons([{ ...j, id: el.id }]); }
   }
 }
 
@@ -2341,8 +2414,18 @@ async function appsLoad() {
   const s = currentSerial(); if (!s) { $('#apps-list').innerHTML = '<div class="empty">Сначала подключите устройство на странице «Подключение».</div>'; return; }
   // имена приложений из кэша подгружаем мгновенно — рисуются сразу (F11)
   try { appLabels = await window.api.appsLabels() || {}; } catch (e) { appLabels = {}; }
-  appsData = await window.api.appsList(s);
+  appsData = await window.api.appsList(s).catch(() => null) || { ok: false, user: [], system: [], disabled: [] };
+  // v2.7.1: пустой ответ — чаще всего pm list не успел по медленному Wi-Fi: одна повторная
+  // попытка и ЧЕСТНОЕ сообщение, чтобы страница не выглядела «пустой без причины»
+  if (appsData && !(appsData.user || []).length && !(appsData.system || []).length) {
+    await new Promise(r => setTimeout(r, 1500));
+    const again = await window.api.appsList(s).catch(() => null);
+    if (again && ((again.user || []).length || (again.system || []).length)) appsData = again;
+  }
   appsRender();
+  if (!(appsData.user || []).length && !(appsData.system || []).length) {
+    $('#apps-list').innerHTML = '<div class="empty">Телефон не вернул список приложений (медленная сеть или экран телефона заблокирован). Нажмите ↽ «Обновить» вверху страницы.</div>';
+  }
   // v2.6: размеры/даты для сортировки — тянем в фоне, потом перерисуем
   const all = Array.from(new Set([...(appsData.user || []), ...(appsData.system || [])]));
   try {
@@ -2769,6 +2852,9 @@ window.api.onTask(async ev => {
     const msg = 'Загружено ' + mb + ' МБ…';
     if (!$('#dlg-imgview').classList.contains('hidden')) $('#imgview-msg').textContent = msg;
     if (!$('#dlg-media').classList.contains('hidden') && !mp.isVideo) $('#media-now-sub').textContent = msg;
+  } else if (ev.kind === 'apk-meta-progress') {
+    // v2.7.1: честный статус разбора APK из файлового менеджера (иконка/имя тянутся с телефона)
+    if (ev.stage === 'pull') snack('Изучаю приложение ' + ev.file + (ev.size ? ' (' + Math.round(ev.size / 1048576) + ' МБ)' : '') + ' — иконка появится после загрузки…', 6000);
   } else if (ev.kind === 'open-apk') {
     // v2.6: файл открыт ассоциацией (двойной клик в Проводнике) или передан аргументом
     openApkMini(ev.path);

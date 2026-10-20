@@ -34,18 +34,22 @@ const CMDS_FILE = path.join(SAVE_DIR, 'Мои команды.json'); // свои
 const ICON_CACHE = path.join(SAVE_DIR, 'Кэш иконок');      // кэш иконок/имён приложений
 const LOG_FILE = path.join(BASE_DIR, 'app.log');
 
-// ---------- журнал: ТОЛЬКО ошибки (F19), ротация при переполнении ----------
-function logErr(tag, ...a) {
+// ---------- журнал: ошибки (ERROR) + важные события/диагностика (INFO), ротация при переполнении ----------
+function logLine(level, tag, ...a) {
   try {
     if (fs.existsSync(LOG_FILE) && fs.statSync(LOG_FILE).size > 2 * 1024 * 1024) {
       try { fs.renameSync(LOG_FILE, LOG_FILE.replace(/\.log$/, '.old.log')); } catch (e) {}
     }
-    const line = new Date().toISOString() + ' ERROR ' + tag + ' ' + a.map(x =>
+    const line = new Date().toISOString() + ' ' + level + ' ' + tag + ' ' + a.map(x =>
       typeof x === 'string' ? x : (x instanceof Error ? (x.stack || x.message) : JSON.stringify(x))).join(' ') + '\n';
     fs.appendFileSync(LOG_FILE, line);
   } catch (e) {}
 }
-// совместимость: прежние информационные log() больше НЕ пишут в файл (в журнале только ошибки)
+function logErr(tag, ...a) { logLine('ERROR', tag, ...a); }
+// v2.7.1: INFO-уровень — диагностика и ключевые события попадают в app.log по просьбе владельца
+// («когда я запускаю диагностику, вся эта информация должна отображаться в логфайле»)
+function logInfo(tag, ...a) { logLine('INFO ', tag, ...a); }
+// совместимость: прежние информационные log() больше НЕ пишут в файл
 function log() {}
 process.on('uncaughtException', e => { logErr('uncaught', e && (e.stack || e.message) || String(e)); });
 
@@ -677,10 +681,26 @@ function registerIpc() {
     return d;
   });
   // R8: все пути подключения идут через connectDevice (сериализация + enforce одного устройства)
+  // v2.7.1: САМОИСЦЕЛЕНИЕ при отказе порта (жалоба: «cannot connect ... 10061» в журнале).
+  // Причина ошибки почти всегда одна: порт беспроводной отладки МЕНЯЕТСЯ при каждом включении
+  // экрана «Беспроводная отладка», а владельцы часто вводят СТАРЫЙ порт или порт СОПРЯЖЕНИЯ
+  // (они разные!). Вместо тупого «Не удалось подключиться» — сами ищем живой порт: mDNS,
+  // затем быстрый свип портов. Это занимает секунды и спасает без ручного перебора.
   ipcMain.handle('adb:connect', async (_e, host, port, model) => {
     const r = await connectDevice(host, port, { model });
-    if (!r.ok) logErr('connect', host + ':' + port, r.message || r.error || 'fail');
-    return r;
+    if (r.ok) { logInfo('connect', host + ':' + port, 'OK', model || ''); return r; }
+    logErr('connect', host + ':' + port, r.message || r.error || 'fail');
+    logInfo('connect', host + ':' + port, 'порт закрыт — запускаю автопоиск живого порта');
+    const healed = await autoFindAndConnect(host);
+    if (healed.ok) {
+      logInfo('connect', 'самоисцеление: ' + healed.host + ':' + healed.port);
+      return { ok: true, host: healed.host, port: healed.port, healed: true,
+        message: 'Подключено через порт ' + healed.port + ' — введённый порт ' + port + ' был закрыт (порт меняется при каждом включении беспроводной отладки).' };
+    }
+    return { ok: false, message:
+      'Порт ' + port + ' закрыт, живой порт не найден. Порт меняется ПРИ КАЖДОМ включении «Беспроводной отладки»: ' +
+      'откройте этот экран на телефоне и введите НОВЫЙ порт. И порт СОПРЯЖЕНИЯ и порт ПОДКЛЮЧЕНИЯ — это два разных порта. ' +
+      'Также проверьте: телефон в той же Wi-Fi-сети, экран «Беспроводная отладка» открыт.' };
   });
   ipcMain.handle('adb:disconnect', async (_e, serial) => {
     if (!serial || !String(serial).includes(':')) return { ok: false, message: 'Нужен serial вида host:port' };
@@ -694,6 +714,25 @@ function registerIpc() {
     if (!r.ok) logErr('pair', host + ':' + port, r.error || r.message || 'fail');
     return r;
   });
+  // v2.7.1: поиск ЖИВОГО порта отладки на хосте: mDNS-порт → быстрый свип → соседние порты.
+  // Используется самоисцелением adb:connect; максимум ~12 с.
+  async function autoFindAndConnect(host) {
+    const candidates = [];
+    try {
+      const recs = await mdns.discover(1200).catch(() => []);
+      for (const x of (recs || [])) {
+        if (x.host === host && String(x.service || '').includes('_adb-tls-connect')) candidates.push(x.port);
+      }
+    } catch (e) {}
+    const swept = await adb.portScanFast(host).catch(() => []);
+    for (const p of (swept || [])) if (!candidates.includes(p)) candidates.push(p);
+    for (const p of candidates.slice(0, 6)) {
+      const c = await connectDevice(host, p).catch(() => ({ ok: false }));
+      if (c.ok) return { ok: true, host, port: p };
+    }
+    return { ok: false };
+  }
+
   // QR-подключение (Android 11+): статусы идут в renderer через task:event { kind:'qr-status', stage, message }
   ipcMain.handle('qr:start', async () => {
     const r = qrpair.start({
@@ -934,6 +973,8 @@ function registerIpc() {
     return { ok: r.ok, message: (r.stdout || r.stderr).trim() };
   });
 
+  // v2.7.1: полный отчёт диагностики пишется в app.log (INFO) — владелец просил
+  // «когда я запускаю диагностику, вся эта информация должна отображаться в логфайле»
   // v2.7.0: диагностика расширена и честнее. Раздел mDNS-ADB теперь:
   //  * показывает СЫРОЙ вывод «adb mdns services» (видно даже то, что парсер не понял);
   //  * «ок» = команда отработала, а не «что-то найдено» (пустой список — жёлтое предупреждение,
@@ -982,6 +1023,17 @@ function registerIpc() {
       lines: uni.length ? uni.map(x => `${(x.service || '').replace('.local', '')} → ${x.host}:${x.port}`) : ['unicast-ответов нет (телефон выключен/другая сеть)']
     });
     if (!mine.length && !uni.length) rep.suggestions.push('Телефон не виден по mDNS ни одним способом. Проверьте: телефон и ПК в одной Wi-Fi-сети; на телефоне включена «Беспроводная отладка»; сеть Windows помечена «Частной».');
+    try {
+      const t = new Date().toISOString();
+      const dev = serial ? ('устройство: ' + serial) : 'устройство: не выбрано';
+      logInfo('diag', '=== ДИАГНОСТИКА', t, dev, '===');
+      for (const sec of rep.sections) {
+        const st = !sec.ok ? 'ОШИБКА' : (sec.warn ? 'ВНИМАНИЕ' : 'OK');
+        logInfo('diag', '[' + st + '] ' + sec.title + ':', sec.lines.join(' | '));
+      }
+      if (rep.suggestions.length) logInfo('diag', 'Рекомендации:', rep.suggestions.map(s => '- ' + s).join(' '));
+      logInfo('diag', '=== КОНЕЦ ДИАГНОСТИКИ ===');
+    } catch (e) {}
     return rep;
   });
 
@@ -1035,10 +1087,21 @@ function registerIpc() {
     } else {
       jpegTick();
     }
-    log('mirror started', serial, mode);
+    logInfo('mirror', 'старт', serial, 'режим ' + mode);
     return { ok: true, mode, gen };
   });
   ipcMain.handle('mirror:stop', async () => { stopMirrorAll(); return { ok: true }; });
+  // v2.7.1: «перезапуск потока на месте» — renderer переключает режим декодера и просит
+  // СВЕЖИЙ поток (SPS/PPS/IDR в начале), не трогая генерацию сессии и UI
+  ipcMain.handle('mirror:bounce', async () => {
+    if (mirrorMode !== 'h264' || !mirrorSerial) return { ok: false };
+    const gen = mirrorGen, serial = mirrorSerial;
+    try { if (mirrorChild) { mirrorChild.removeAllListeners('close'); mirrorChild.kill('SIGKILL'); mirrorChild = null; } } catch (e) {}
+    await sleep(150);
+    if (gen === mirrorGen && mirrorMode === 'h264') spawnH264(serial, gen);
+    logInfo('mirror', 'bounce: поток перезапущен для нового декодера');
+    return { ok: true };
+  });
   ipcMain.handle('input:tap', async (_e, serial, x, y) => adb.run(['-s', serial, 'shell', 'input', 'tap', String(x), String(y)], { timeout: 5000 }));
   ipcMain.handle('input:swipe', async (_e, serial, x1, y1, x2, y2, ms) => adb.run(['-s', serial, 'shell', 'input', 'swipe', String(x1), String(y1), String(x2), String(y2), String(ms)], { timeout: 8000 }));
   ipcMain.handle('input:key', async (_e, serial, key) => adb.run(['-s', serial, 'shell', 'input', 'keyevent', String(key)], { timeout: 5000 }));
@@ -1488,16 +1551,18 @@ function registerIpc() {
   });
 
   /* ================= v2.7.0: мета APK-ФАЙЛА на телефоне (иконка/имя для файлового менеджера) === */
-  // Тянем APK во временную папку (лимит 80 МБ), разбираем apkicon.js, иконку кладём в кэш.
-  // Ключ кэша — имя+размер: один раз скачали — дальше мгновенно.
+  // Тянем APK во временную папку (лимит 300 МБ — v2.7.1: владельцу нужны иконки и у «тяжёлых»
+  // приложений; раньше молча отказывали после 80 МБ — «приложения не отображаются»),
+  // разбираем apkicon.js, иконку кладём в кэш. Ключ кэша — имя+размер: один раз — дальше мгновенно.
   const fsApkFail = new Set();
-  ipcMain.handle('apk:remotemeta', async (_e, serial, remotePath) => {
+  ipcMain.handle('apk:remotemeta', async (e, serial, remotePath) => {
     try {
       const q = adb.shq(remotePath);
       const st = await adb.run(['-s', serial, 'shell', `stat -c '%s|%Y' ${q} 2>/dev/null`], { timeout: 15000 });
       const [sz, mt] = ((st.stdout || '').trim().split('|'));
       const size = parseInt(sz, 10) || 0;
-      if (size > 80 * 1024 * 1024) return { ok: false, reason: 'big', size };
+      if (size > 300 * 1024 * 1024) return { ok: false, reason: 'big', size };
+      try { e.sender.send('task:event', { kind: 'apk-meta-progress', file: path.basename(remotePath), size, stage: 'pull' }); } catch (err) {}
       fs.mkdirSync(ICON_CACHE, { recursive: true });
       const key = require('crypto').createHash('sha1').update(remotePath + '|' + size).digest('hex').slice(0, 20);
       const cachePng = path.join(ICON_CACHE, 'fs-' + key + '.png');
@@ -1507,7 +1572,10 @@ function registerIpc() {
       }
       if (fsApkFail.has(key)) return { ok: false, reason: 'fail', size };
       const tmp = path.join(os.tmpdir(), 'icon-' + key + '.apk');
-      const pr = await adb.run(['-s', serial, 'pull', remotePath, tmp], { timeout: 300000 });
+      const t0 = Date.now();
+      const pr = await adb.run(['-s', serial, 'pull', remotePath, tmp], { timeout: 900000 });
+      logInfo('apk-meta', path.basename(remotePath), 'pull', pr.ok ? (Math.round(size / 1048576) + ' МБ за ' + Math.round((Date.now() - t0) / 1000) + ' с') : 'НЕ УДАЛСЯ');
+      try { e.sender.send('task:event', { kind: 'apk-meta-progress', file: path.basename(remotePath), stage: pr.ok ? 'parse' : 'fail' }); } catch (err) {}
       if (!pr.ok) { fsApkFail.add(key); return { ok: false, reason: 'pull', size }; }
       let meta = null;
       try { meta = require('./apkicon.js').extractMeta(fs.readFileSync(tmp)); } catch (e) {}
@@ -1603,7 +1671,12 @@ function registerIpc() {
     return { ok: killed > 0, killed, total: list.length };
   });
 
-  /* ================= v2.6.0: ассоциации файлов APK на уровне системы ================= */
+  /* ================= v2.6.0: ассоциации файлов APK на уровне системы =================
+     v2.7.1: владелец жаловался «ассоциация не работает, должна мгновенно примениться».
+     Причины: (1) Проводник не перечитывает ассоциации, пока не скажешь ему SHCNE_ASSOCCHANGED
+     и не сбросишь кэш иконок (ie4uinit); (2) если у расширения есть UserChoice
+     (Explorer\FileExts\<ext>\UserChoice — «всегда открывать этим»), Windows использует ЕГО,
+     а не наш ProgID — UserChoice мы вправе снять, владелец сам включил тумблер. */
   const ASSOC_EXTS = ['apk', 'aab', 'apks', 'xapk', 'apkm', 'obb', 'apk.1', 'apk+', 'apup'];
   const ASSOC_PROGID = 'AdbWifiConnectorRu.APKFile';
   function assocRegArgs(on, exe) {
@@ -1644,11 +1717,26 @@ function registerIpc() {
         });
       });
     }
-    return { ok: true, state, note: 'apks.zip / apk.zip — двойные расширения, Windows их не ассоциирует: открывайте через правую кнопку → «Открыть с помощью»' };
+    return { ok: true, state, note: 'apks.zip / apk.zip — двойные расширения, Windows их не ассоциирует: открывайте через правую кнопку → «Открыть с помощью». Иконки в Проводнике обновятся сразу; если старая программа ещё помнится — снимите её «Открыть по умолчанию» один раз.' };
   });
   ipcMain.handle('assoc:set', async (_e, on) => {
     if (!process.platform.startsWith('win')) return { ok: false, error: 'Только Windows' };
     const r = await regBatch(assocRegArgs(!!on, process.execPath));
+    if (r.ok) {
+      // (1) снимаем UserChoice — иначе Windows продолжит открывать прежней программой
+      const uc = [];
+      for (const ext of ASSOC_EXTS) {
+        uc.push(['delete', 'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\FileExts\\.' + ext + '\\UserChoice', '/f']);
+      }
+      await regBatch(uc);
+      // (2) мгновенное применение: сброс кэша иконок + извещение Проводника о смене ассоциаций
+      await new Promise((res) => execFile('ie4uinit.exe', ['-show'], { windowsHide: true }, () => res()));
+      const ps =
+        'Add-Type -Namespace Win32 -Name Sh -MemberDefinition "[DllImport(\'shell32.dll\')] public static extern void SHChangeNotify(int ev, int fl, IntPtr a, IntPtr b);"; ' +
+        '[Win32.Sh]::SHChangeNotify(0x08000000, 0, [IntPtr]::Zero, [IntPtr]::Zero)';
+      await new Promise((res) => execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-WindowStyle', 'Hidden', '-Command', ps], { windowsHide: true, timeout: 15000 }, () => res()));
+      logInfo('assoc', on ? 'включены' : 'выключены', 'UserChoice снят, SHChangeNotify отправлен');
+    }
     return r;
   });
 

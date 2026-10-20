@@ -64,6 +64,7 @@ contextBridge.exposeInMainWorld('api', {
   savedRename: invoke('saved:rename'),
   mirrorStart: invoke('mirror:start'),   // mirrorStart(serial, mode: 'h264'|'jpeg')
   mirrorStop: invoke('mirror:stop'),
+  mirrorBounce: invoke('mirror:bounce'),  // v2.7.1: свежий h264-поток без пересборки UI
   inputTap: invoke('input:tap'),
   inputSwipe: invoke('input:swipe'),
   inputKey: invoke('input:key'),

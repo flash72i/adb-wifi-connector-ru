@@ -154,11 +154,6 @@ a { color: var(--accent); }
 }
 .chip:hover { border-color: var(--accent); color: var(--accent); }
 .chip-danger:hover { border-color: var(--danger); color: var(--danger); }
-.diag { margin-top: 10px; display: flex; flex-direction: column; gap: 8px; }
-.diag-sec { border: 1px solid var(--outline); border-radius: 10px; padding: 10px 12px; }
-.diag-sec b { display: flex; gap: 8px; align-items: center; }
-.diag-sec pre { margin: 6px 0 0; font-family: var(--mono); font-size: 12px; color: var(--text-2); white-space: pre-wrap; }
-.diag-sugg { background: color-mix(in srgb, var(--warn) 14%, var(--surface)); border-radius: 10px; padding: 10px 12px; }
 
 /* ===== настройки ===== */
 .switch-row { display: flex; align-items: center; justify-content: space-between; padding: 9px 0; gap: 16px; }
@@ -538,8 +533,50 @@ input[type="range"] { accent-color: var(--accent); }
 
 /* ==================== v2.7.0 ==================== */
 
-/* --- вид «как в Проводнике»: список / значки / огромные значки --- */
-#fs-views .view-chip.active { border-color: var(--accent); color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, var(--surface)); }
+/* --- v2.7.1: кнопка «Вид» с выпадающим меню как в Проводнике Windows 11 --- */
+.view-dd { position: relative; display: inline-block; }
+.view-dd .view-caret { font-size: 10px; opacity: .8; }
+.view-menu {
+  position: absolute; top: calc(100% + 6px); left: 0; z-index: 60; min-width: 250px;
+  background: var(--surface); border: 1px solid var(--outline); border-radius: 14px;
+  box-shadow: 0 14px 38px rgba(0,0,0,.45); padding: 6px; display: flex; flex-direction: column; gap: 2px;
+}
+.view-menu.hidden { display: none; }
+.view-item {
+  display: flex; align-items: center; gap: 9px; text-align: left; width: 100%;
+  background: none; border: 0; color: var(--text); font: inherit; cursor: pointer;
+  padding: 8px 10px; border-radius: 9px; white-space: nowrap;
+}
+.view-item:hover { background: var(--surface-2); }
+.view-item.active { color: var(--accent); }
+.view-radio { width: 15px; height: 15px; border-radius: 50%; border: 1.6px solid var(--outline); flex: 0 0 auto; position: relative; }
+.view-item.active .view-radio { border-color: var(--accent); }
+.view-item.active .view-radio::after { content: ""; position: absolute; inset: 3px; border-radius: 50%; background: var(--accent); }
+.view-sep { height: 1px; background: var(--outline); margin: 5px 6px; }
+.view-slider { padding: 8px 12px 10px; }
+.view-slider input[type=range] { width: 100%; accent-color: var(--accent); cursor: pointer; }
+.view-slider-labels { display: flex; justify-content: space-between; font-size: 10.5px; color: var(--text-2); margin-top: 3px; }
+
+/* --- v2.7.1: диагностика — компактная сетка, строки ПЕРЕНОСЯТСЯ и не вылезают за экран --- */
+.diag { margin-top: 10px; display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.diag-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(290px, 1fr)); gap: 8px; min-width: 0; }
+.diag-sec { border: 1px solid var(--outline); border-radius: 10px; padding: 8px 11px; min-width: 0; overflow: hidden; }
+.diag-sec.is-ok { border-color: color-mix(in srgb, var(--ok) 34%, var(--outline)); }
+.diag-sec.is-warn { border-color: color-mix(in srgb, var(--warn) 42%, var(--outline)); }
+.diag-sec.is-err { border-color: color-mix(in srgb, var(--danger) 46%, var(--outline)); }
+.diag-sec b { display: flex; gap: 8px; align-items: center; font-size: 12.5px; }
+.diag-sec .d-ok { color: var(--ok); } .diag-sec .d-warn { color: var(--warn); } .diag-sec .d-err { color: var(--danger); }
+.diag-lines { margin-top: 5px; display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.diag-line {
+  font-family: var(--mono); font-size: 11.5px; color: var(--text-2);
+  white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word; line-height: 1.45;
+}
+.diag-sugg { background: color-mix(in srgb, var(--warn) 14%, var(--surface)); border-radius: 10px; padding: 9px 12px; min-width: 0; }
+.diag-sugg b { font-size: 12.5px; }
+.diag-sugg-list { margin: 6px 0 0; padding-left: 18px; display: flex; flex-direction: column; gap: 4px; }
+.diag-sugg-list li { font-size: 12px; color: var(--text-2); overflow-wrap: anywhere; word-break: break-word; }
+
+/* --- старые стили вида (заменены кнопкой «Вид» выше) --- */
 #fs-list.fs-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(122px, 1fr)); gap: 10px; }
 #fs-list.fs-grid .fs-cell { display: flex; flex-direction: column; align-items: center; gap: 6px; padding: 10px 6px 8px;
   border: 1px solid var(--outline); border-radius: 14px; background: var(--surface-2); cursor: pointer; position: relative; }
