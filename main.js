@@ -12,6 +12,11 @@ const adb = require('./adb');
 const mdns = require('./mdns');
 const qrpair = require('./qrpair');
 
+// v2.7.0: разрешаем автовоспроизведение медиа в плеере БЕЗ жеста пользователя —
+// иначе Chromium блокировал video.play() после асинхронной загрузки файла с телефона
+// («открывается плеер, но не воспроизводит, просто чёрный экран»)
+app.commandLine.appendSwitch('autoplay-policy', 'no-user-gesture-required');
+
 // база: каталог над APP/, если exe лежит в APP/, иначе каталог exe
 const BASE_DIR = (() => {
   const d = path.dirname(process.execPath);
@@ -65,6 +70,7 @@ let favorites = []; // [{host, port, model}]
 let win = null;
 let tray = null;
 let quitting = false;
+let miniWin = null;   // v2.7.0: отдельное окно установки APK (ассоциация файлов — БЕЗ основной программы)
 
 // дочерние процессы — на уровне модуля: before-quit обязан гасить ВСЕ (A2-ревью)
 let logcatChild = null;
@@ -89,11 +95,15 @@ function localIpv4() {
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
 // Автопайплайн: знаем IP телефона и код -> сами находим порты, сопрягаем, подключаем
+// v2.7.0: поиск портов — БЫСТРЫЙ (ранний выход после первого найденного порта, ~1–2 с
+// вместо полного свипа на ~24 с) — отсюда была «вечная» фаза сопряжения
 async function autoPairConnect(host, code, hintPort) {
-  let ports = hintPort ? [hintPort] : await adb.portRangeScan(host);
+  let ports;
   if (hintPort) {
     const probe = await adb.tcpProbe(host, hintPort);
-    if (!probe) ports = await adb.portRangeScan(host);
+    ports = probe ? [hintPort] : await adb.portScanFast(host);
+  } else {
+    ports = await adb.portScanFast(host);
   }
   let paired = false, pairPort = null;
   for (const p of ports) {
@@ -103,9 +113,13 @@ async function autoPairConnect(host, code, hintPort) {
   if (!paired) {
     return { ok: false, error: 'Сопряжение не удалось (порты: ' + (ports.slice(0, 8).join(', ') || 'не найдены') + '). Держите на телефоне открытым экран «Сопряжение по коду».' };
   }
-  const after = await adb.portRangeScan(host);
-  let connPorts = after.filter(p => p !== pairPort);
-  if (!connPorts.length) connPorts = after.length ? after : [5555];
+  // после сопряжения порт сопряжения закрывается и открывается порт отладки — часто СОСЕДНИЙ:
+  // сначала пробуем соседние порты (мгновенно), затем быстрый свип
+  const after = [];
+  for (const p of [pairPort + 1, pairPort - 1, pairPort + 2]) if (p > 1024) after.push(p);
+  const swept = await adb.portScanFast(host);
+  const connPorts = after.concat(swept).filter((p, i, a) => p !== pairPort && a.indexOf(p) === i);
+  if (!connPorts.length) connPorts.push(5555);
   for (const p of connPorts) {
     // подключаем через ЕДИНУЮ точку: rememberDevice + enforceSingleDevice + трей (R8)
     const c = await connectDevice(host, p);
@@ -395,7 +409,41 @@ function buildTrayMenu() {
 
 // ---------- вспомогательное ----------
 function stamp() { return new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19); }
-function sendTask(ev) { if (win && !win.isDestroyed()) win.webContents.send('task:event', ev); }
+// события идут И в главное окно, И в мини-окно APK (если открыто)
+function sendTask(ev) {
+  try { if (win && !win.isDestroyed()) win.webContents.send('task:event', ev); } catch (e) {}
+  try { if (miniWin && !miniWin.isDestroyed()) miniWin.webContents.send('task:event', ev); } catch (e) {}
+}
+
+// ---------- v2.7.0: отдельное мини-окно установки APK ----------
+// Владелец: «когда я открываю файл АПК с рабочего стола… она открывается сразу в программе.
+// Сделай так, чтобы она открывалась БЕЗ программы, и это окошко можно было перемещать по рабочему
+// столу». Отдельное frameless-окно с перетаскиванием за заголовок: иконка/имя/версия APK,
+// список устройств, подключение нового устройства прямо из окошка, установка с прогрессом.
+function openApkStandalone(filePath) {
+  try {
+    if (miniWin && !miniWin.isDestroyed()) {
+      miniWin.show(); miniWin.focus();
+      miniWin.webContents.send('apkmini:file', filePath);
+      return true;
+    }
+    miniWin = new BrowserWindow({
+      width: 440, height: 640, minWidth: 380, minHeight: 500,
+      show: false, frame: false, resizable: true, backgroundColor: '#0e1418',
+      icon: path.join(__dirname, 'assets', 'icon.png'),
+      webPreferences: {
+        preload: path.join(__dirname, 'preload.js'),
+        contextIsolation: true, nodeIntegration: false, sandbox: true
+      }
+    });
+    miniWin.setAlwaysOnTop(false);
+    miniWin.loadFile(path.join(__dirname, 'renderer', 'apkmini.html'), { hash: encodeURIComponent(filePath) });
+    miniWin.once('ready-to-show', () => { try { miniWin.show(); miniWin.focus(); } catch (e) {} });
+    miniWin.on('closed', () => { miniWin = null; });
+    miniWin.webContents.on('render-process-gone', () => { miniWin = null; });
+    return true;
+  } catch (e) { logErr('apkmini', e.message); return false; }
+}
 
 // Объединённое обнаружение беспроводной отладки: свой mDNS-клиент + adb mdns services
 async function mergedDiscover() {
@@ -692,7 +740,8 @@ function registerIpc() {
     function x2(s) { return s === 'adb-mdns' ? 'adb mDNS' : 'mDNS'; }
   });
   ipcMain.handle('adb:mdns', async () => mergedDiscover());
-  ipcMain.handle('adb:port-scan', async (_e, host) => adb.portRangeScan(host));
+  // v2.7.0: «Найти порт» — быстрый свип с ранним выходом (~1–2 с вместо ~24 с)
+  ipcMain.handle('adb:port-scan', async (_e, host) => adb.portScanFast(host));
   ipcMain.handle('adb:auto-pair', async (_e, host, code, port) => {
     const r = await autoPairConnect(host, code, port || null);
     if (r.ok) sendTask({ kind: 'refresh-devices' });
@@ -885,6 +934,11 @@ function registerIpc() {
     return { ok: r.ok, message: (r.stdout || r.stderr).trim() };
   });
 
+  // v2.7.0: диагностика расширена и честнее. Раздел mDNS-ADB теперь:
+  //  * показывает СЫРОЙ вывод «adb mdns services» (видно даже то, что парсер не понял);
+  //  * «ок» = команда отработала, а не «что-то найдено» (пустой список — жёлтое предупреждение,
+  //    а не красная ошибка: сервисы видны только пока на телефоне открыт экран беспроводной отладки);
+  //  * добавлены разделы собственного mDNS-клиента и unicast-свипа подсети.
   ipcMain.handle('tools:diagnostics', async (_e, serial) => {
     const rep = { sections: [], suggestions: [] };
     const v = await adb.version();
@@ -898,9 +952,36 @@ function registerIpc() {
       rep.sections.push({ id: 'response', title: 'Отклик устройства', ok: p.ok, lines: p.ok ? [`ответ за ${p.ms} мс`] : ['нет ответа'] });
       if (!p.ok) rep.suggestions.push('Проверьте, что телефон в той же сети и беспроводная отладка включена.');
     }
+    // --- mDNS-сервисы adb: raw + статус warn вместо fail ---
     const m = await adb.mdnsServices();
-    rep.sections.push({ id: 'mdns', title: 'mDNS-сервисы (adb)', ok: m.items.length > 0, lines: m.items.length ? m.items.map(x => `${x.service} → ${x.host}:${x.port}`) : ['сервисы не обнаружены'] });
-    if (!m.items.length) rep.suggestions.push('Если телефон не находится по сети: проверьте, что сеть Windows «Частная», и что брандмауэр разрешает приложению UDP 5353 (обнаружение mDNS).');
+    const raw = await adb.run(['mdns', 'services'], { timeout: 8000 }).catch(() => null);
+    const rawLines = ((raw && raw.stdout) || '').split(/\r?\n/).filter(x => x.trim()).slice(0, 10);
+    rep.sections.push({
+      id: 'mdns',
+      title: 'mDNS-сервисы (adb mdns services)',
+      ok: m.ok, warn: m.ok && !m.items.length,
+      lines: m.ok
+        ? (m.items.length
+          ? m.items.map(x => `${x.service} → ${x.host}:${x.port}`)
+          : ['сервисов сейчас нет (это НЕ ошибка команды)', ...rawLines.map(x => '  raw: ' + x)])
+        : [raw && raw.stderr ? ('команда вернула ошибку: ' + raw.stderr.trim().slice(0, 160)) : 'команда не ответила']
+    });
+    if (m.ok && !m.items.length) rep.suggestions.push('Откройте на телефоне экран «Беспроводная отладка» (сервисы публикуются только пока он открыт) и повторите диагностику. Если пусто и так — проверьте, что сеть Windows «Частная», а брандмауэр разрешает UDP 5353.');
+    if (!m.ok) rep.suggestions.push('Команда «adb mdns services» не отработала — попробуйте перезапустить программу (adb-сервер перезапустится вместе с ней).');
+    // --- собственный mDNS-клиент + unicast-свип (работают там, где adb mdns глушится сетью) ---
+    const [mine, uni] = await Promise.all([
+      mdns.discover(2500).catch(() => []),
+      mdns.discoverUnicast(2500).catch(() => [])
+    ]);
+    rep.sections.push({
+      id: 'mdns-own', title: 'mDNS-обнаружение (свой клиент)', ok: true, warn: !mine.length,
+      lines: mine.length ? mine.map(x => `${(x.service || '').replace('.local', '')} → ${x.host}:${x.port}`) : ['мульткаст-ответов нет (роутер может резать multicast)']
+    });
+    rep.sections.push({
+      id: 'mdns-uni', title: 'Unicast-обход подсети (роутеры без multicast)', ok: true, warn: !uni.length,
+      lines: uni.length ? uni.map(x => `${(x.service || '').replace('.local', '')} → ${x.host}:${x.port}`) : ['unicast-ответов нет (телефон выключен/другая сеть)']
+    });
+    if (!mine.length && !uni.length) rep.suggestions.push('Телефон не виден по mDNS ни одним способом. Проверьте: телефон и ПК в одной Wi-Fi-сети; на телефоне включена «Беспроводная отладка»; сеть Windows помечена «Частной».');
     return rep;
   });
 
@@ -1281,10 +1362,11 @@ function registerIpc() {
   /* ================= v2.6.0: просмотрщик/плеер — бинарное чтение файла с телефона ================= */
   // exec-out cat — единственный быстрый способ забрать файл без диалога сохранения;
   // сырой spawn (adb.run текстовый, бинарник портит). Прогресс — в renderer событиями.
-  ipcMain.handle('fs:cat', async (e, serial, remote) => {
+  // v2.7.0: maxMB — отдельный лимит для текстов/PDF (8 МБ), медиа — как раньше (768 МБ).
+  ipcMain.handle('fs:cat', async (e, serial, remote, maxMB) => {
     const exe = adb.getAdbPath();
     if (!exe) return { ok: false, error: 'adb не найден' };
-    const MAX = 768 * 1024 * 1024;
+    const MAX = Math.max(1, parseInt(maxMB, 10) || 768) * 1024 * 1024;
     return await new Promise((resolve) => {
       const child = require('child_process').spawn(exe, ['-s', serial, 'exec-out', 'cat ' + adb.shq(remote)], { windowsHide: true });
       const chunks = []; let bytes = 0; let lastE = 0; let capped = false;
@@ -1299,12 +1381,159 @@ function registerIpc() {
       child.on('close', () => {
         clearTimeout(timer);
         const buf = Buffer.concat(chunks);
-        if (capped) return resolve({ ok: false, error: 'Файл больше 768 МБ — воспроизведение в окне недоступно, скачайте его кнопкой «Скачать»' });
+        if (capped) return resolve({ ok: false, capped: true, error: 'Файл слишком большой для просмотра в окне (' + Math.round(MAX / 1048576) + ' МБ лимит) — скачайте его кнопкой «Скачать»' });
         // пустой ответ и/или «cat: <path>: No such file» — отдаём ошибку
         if (!buf.length) return resolve({ ok: false, error: 'Устройство не вернуло файл (путь существует?)' });
         resolve({ ok: true, buf, bytes });
       });
     });
+  });
+
+  /* ================= v2.7.0: открыть файл с телефона в ПОЛЬЗОВАТЕЛЬСКОЙ программе на ПК ============ */
+  // HTML — в системном браузере (триjs-анимации требуют CDN и полного JS), видео/аудио с редкими
+  // кодеками — в системном плеере, PDF — в системной программе. Файл тянется во временную папку.
+  ipcMain.handle('fs:open-on-pc', async (e, serial, remote) => {
+    const exe = adb.getAdbPath();
+    if (!exe) return { ok: false, error: 'adb не найден' };
+    const tmpDir = path.join(os.tmpdir(), 'adbwifi-open');
+    try { fs.mkdirSync(tmpDir, { recursive: true }); } catch (err) {}
+    const local = path.join(tmpDir, path.basename(remote).replace(/[\\/:*?"<>|]/g, '_'));
+    sendTask({ kind: 'fsload-progress', file: remote, bytes: 0 });
+    const r = await adb.run(['-s', serial, 'pull', remote, local], { timeout: 600000 });
+    if (!r.ok) return { ok: false, error: 'Не удалось скачать файл: ' + ((r.stderr || r.error || '').trim().slice(0, 150) || 'ошибка') };
+    const open = await shell.openPath(local);
+    return open ? { ok: false, error: 'Файл скачан (' + local + '), но системная программа его не открыла: ' + open } : { ok: true, file: local };
+  });
+
+  /* ================= v2.7.0: распаковка архива на устройстве (свойства → «Распаковать») ============ */
+  // Поддержка: zip/jar (unzip на устройстве; если unzip нет — скачаем на ПК, распакуем своим
+  // парсером и зальём обратно), tar/tar.gz/tgz/tar.bz2/tar.xz (tar на устройстве).
+  // RAR/7z честно отклоняем: распаковщиков на Android нет.
+  ipcMain.handle('fs:extract', async (e, serial, remote) => {
+    const base = path.basename(remote);
+    const dir = path.posix.dirname(remote.replace(/\\/g, '/'));
+    const mExt = base.match(/\.(tar\.gz|tar\.bz2|tar\.xz|tgz|tbz2|zip|jar|tar)$/i);
+    if (!mExt) return { ok: false, error: 'Распаковка поддерживается для ZIP/JAR/TAR(.gz/.bz2/.xz). RAR и 7z на устройстве распаковать нельзя — скачайте файл и распакуйте на компьютере.' };
+    const ext = mExt[1].toLowerCase();
+    const folderName = base.slice(0, base.length - mExt[0].length).replace(/[\\/:*?"<>|]/g, '_').trim() || 'archive';
+    const dest = (dir === '/' ? '' : dir) + '/' + folderName;
+    const q = (s) => adb.shq(s);
+    const run = (args, timeout) => adb.run(['-s', serial, 'shell', args], { timeout: timeout || 600000 });
+    // 1) создаём папку
+    const mk = await run(`mkdir -p ${q(dest)}`, 15000);
+    if (!mk.ok) return { ok: false, error: 'Не удалось создать папку ' + dest + ': ' + ((mk.stderr || '').slice(0, 120)) };
+    // 2) пробуем распаковать НА УСТРОЙСТВЕ
+    let cmd = null;
+    if (ext === 'zip' || ext === 'jar') cmd = `unzip -o -q ${q(remote)} -d ${q(dest)} 2>/dev/null || unzip -o ${q(remote)} -d ${q(dest)} 2>/dev/null`; // -q есть не везде
+    else if (ext === 'tar') cmd = `tar -xf ${q(remote)} -C ${q(dest)}`;
+    else if (ext === 'tar.gz' || ext === 'tgz') cmd = `tar -zxf ${q(remote)} -C ${q(dest)} 2>/dev/null || tar -xf ${q(remote)} -C ${q(dest)}`;
+    else if (ext === 'tar.bz2' || ext === 'tbz2') cmd = `tar -jxf ${q(remote)} -C ${q(dest)} 2>/dev/null || tar -xf ${q(remote)} -C ${q(dest)}`;
+    else if (ext === 'tar.xz') cmd = `tar -Jxf ${q(remote)} -C ${q(dest)} 2>/dev/null || tar -xf ${q(remote)} -C ${q(dest)}`;
+    sendTask({ kind: 'fs-extract-progress', file: base, stage: 'device' });
+    let r = cmd ? await run(cmd, 900000) : { ok: false };
+    let where = 'на устройстве';
+    // 3) фолбэк: unzip отсутствует на устройстве — распаковываем НА ПК и заливаем папку
+    if ((!r.ok || /not found|not recognized/i.test((r.stderr || '') + (r.stdout || ''))) && (ext === 'zip' || ext === 'jar')) {
+      sendTask({ kind: 'fs-extract-progress', file: base, stage: 'pc' });
+      const st = await adb.run(['-s', serial, 'shell', `stat -c %s ${q(remote)}`], { timeout: 15000 }).catch(() => null);
+      const size = parseInt((st && st.stdout) || '0', 10) || 0;
+      if (size > 300 * 1024 * 1024) return { ok: false, error: 'На устройстве нет unzip, а архив больше 300 МБ — скачайте его и распакуйте на компьютере.' };
+      const tmpZip = path.join(os.tmpdir(), 'adbwifi-ext-' + Date.now() + '-' + base.replace(/[^\w.\-]/g, '_'));
+      const pulled = await adb.run(['-s', serial, 'pull', remote, tmpZip], { timeout: 600000 });
+      if (!pulled.ok) return { ok: false, error: 'Не удалось скачать архив для распаковки: ' + ((pulled.stderr || '').slice(0, 120)) };
+      try {
+        const buf = fs.readFileSync(tmpZip);
+        const z = require('./apkicon.js').parseZip(buf);
+        if (!z) throw new Error('архив повреждён или защищён паролем');
+        const names = Object.keys(z.entries).filter(n => !n.endsWith('/'));
+        let done = 0;
+        const tmpRoot = path.join(os.tmpdir(), 'adbwifi-extd-' + Date.now());
+        fs.mkdirSync(tmpRoot, { recursive: true });
+        for (const n of names) {
+          const data = require('./apkicon.js').zipRead(z, n);
+          if (!data) continue;
+          const safe = n.replace(/\\/g, '/').replace(/\.\.(\/|$)/g, '__'); // защита от ../
+          const outP = path.join(tmpRoot, safe);
+          fs.mkdirSync(path.dirname(outP), { recursive: true });
+          fs.writeFileSync(outP, data);
+          done++;
+        }
+        const pushed = await adb.run(['-s', serial, 'push', tmpRoot + '/.', dest + '/'], { timeout: 900000 });
+        try { fs.rmSync(tmpRoot, { recursive: true, force: true }); fs.unlinkSync(tmpZip); } catch (err) {}
+        if (!pushed.ok) return { ok: false, error: 'Распаковано на ПК (' + done + ' файлов), но загрузка на телефон не удалась: ' + ((pushed.stderr || '').slice(0, 120)) };
+        r = { ok: true, stdout: '' };
+        where = 'на компьютере (на устройстве нет unzip)';
+      } catch (err) {
+        try { fs.unlinkSync(tmpZip); } catch (e2) {}
+        return { ok: false, error: 'Распаковка не удалась: ' + err.message };
+      }
+    }
+    if (!r.ok) {
+      const msg = ((r.stderr || r.stdout || '').trim().split('\n')[0] || '').slice(0, 160);
+      await run(`rm -rf ${q(dest)}`, 30000).catch(() => {});
+      return { ok: false, error: 'Распаковать не удалось' + (msg ? ': ' + msg : '') + '. Если это RAR/7z — на устройстве нет распаковщика, скачайте файл.' };
+    }
+    const cnt = await run(`find ${q(dest)} -type f 2>/dev/null | wc -l`, 30000);
+    const files = parseInt((cnt.stdout || '0').trim(), 10) || 0;
+    return { ok: true, dest, files, where };
+  });
+
+  /* ================= v2.7.0: открыть ЛОКАЛЬНЫЙ файл системной программой ================= */
+  ipcMain.handle('shell:open-path', async (_e, p) => {
+    try {
+      if (!p || !fs.existsSync(p)) return { ok: false, error: 'Файл не найден: ' + p };
+      const err = await shell.openPath(p);
+      return err ? { ok: false, error: err } : { ok: true };
+    } catch (e) { return { ok: false, error: e.message }; }
+  });
+
+  /* ================= v2.7.0: мета APK-ФАЙЛА на телефоне (иконка/имя для файлового менеджера) === */
+  // Тянем APK во временную папку (лимит 80 МБ), разбираем apkicon.js, иконку кладём в кэш.
+  // Ключ кэша — имя+размер: один раз скачали — дальше мгновенно.
+  const fsApkFail = new Set();
+  ipcMain.handle('apk:remotemeta', async (_e, serial, remotePath) => {
+    try {
+      const q = adb.shq(remotePath);
+      const st = await adb.run(['-s', serial, 'shell', `stat -c '%s|%Y' ${q} 2>/dev/null`], { timeout: 15000 });
+      const [sz, mt] = ((st.stdout || '').trim().split('|'));
+      const size = parseInt(sz, 10) || 0;
+      if (size > 80 * 1024 * 1024) return { ok: false, reason: 'big', size };
+      fs.mkdirSync(ICON_CACHE, { recursive: true });
+      const key = require('crypto').createHash('sha1').update(remotePath + '|' + size).digest('hex').slice(0, 20);
+      const cachePng = path.join(ICON_CACHE, 'fs-' + key + '.png');
+      const labels = labelsLoad();
+      if (fs.existsSync(cachePng)) {
+        return { ok: true, dataUrl: 'data:image/png;base64,' + fs.readFileSync(cachePng).toString('base64'), label: labels['fs:' + key] || null, size, mtime: (parseInt(mt, 10) || 0) * 1000 };
+      }
+      if (fsApkFail.has(key)) return { ok: false, reason: 'fail', size };
+      const tmp = path.join(os.tmpdir(), 'icon-' + key + '.apk');
+      const pr = await adb.run(['-s', serial, 'pull', remotePath, tmp], { timeout: 300000 });
+      if (!pr.ok) { fsApkFail.add(key); return { ok: false, reason: 'pull', size }; }
+      let meta = null;
+      try { meta = require('./apkicon.js').extractMeta(fs.readFileSync(tmp)); } catch (e) {}
+      try { fs.unlinkSync(tmp); } catch (e) {}
+      if (meta && meta.icon) fs.writeFileSync(cachePng, meta.icon.data);
+      if (meta && meta.label) { labels['fs:' + key] = meta.label; labelsSave(labels); }
+      if (!meta || (!meta.icon && !meta.label)) { fsApkFail.add(key); return { ok: false, reason: 'meta', size }; }
+      return {
+        ok: true,
+        dataUrl: meta.icon ? ('data:' + meta.icon.mime + ';base64,' + meta.icon.data.toString('base64')) : null,
+        label: meta.label || null, package: meta.package || null, versionName: meta.versionName || null,
+        size, mtime: (parseInt(mt, 10) || 0) * 1000
+      };
+    } catch (e) { return { ok: false, error: e.message }; }
+  });
+
+  /* ================= v2.7.0: иконка процесса ТОЛЬКО ИЗ КЭША (без скачивания APK) ============ */
+  ipcMain.handle('apps:icon-peek', async (_e, pkg) => {
+    try {
+      const key = String(pkg).replace(/[^a-z0-9._]/gi, '_');
+      const cachePng = path.join(ICON_CACHE, key + '.png');
+      if (fs.existsSync(cachePng)) {
+        return { ok: true, dataUrl: 'data:image/png;base64,' + fs.readFileSync(cachePng).toString('base64'), label: labelsLoad()[pkg] || null };
+      }
+      return { ok: false, label: labelsLoad()[pkg] || null };
+    } catch (e) { return { ok: false }; }
   });
 
   /* ================= v2.6.0: мета локальных APK (иконка/имя/пакет/версия) ================= */
@@ -1533,9 +1762,13 @@ function fileFromArgv(argv) {
 }
 if (!gotLock) { app.quit(); } else {
   app.on('second-instance', (_e, argv) => {
-    if (win) { win.show(); win.focus(); }
     const f = fileFromArgv(argv);
-    if (f) sendTask({ kind: 'open-apk', path: f });
+    if (f) {
+      // v2.7.0: APK с рабочего стола открывается в ОТДЕЛЬНОМ окошке, основную программу не показываем
+      if (!openApkStandalone(f)) { if (win) { win.show(); win.focus(); } sendTask({ kind: 'open-apk', path: f }); }
+      return;
+    }
+    if (win) { win.show(); win.focus(); }
   });
   app.whenReady().then(async () => {
     loadAll();
@@ -1546,7 +1779,9 @@ if (!gotLock) { app.quit(); } else {
     tray.on('click', () => { win.isVisible() ? win.hide() : (win.show(), win.focus()); });
     // файл, переданный ассоциацией при ПЕРВОМ запуске (argv[1]) — после загрузки renderer
     const openFile = fileFromArgv(process.argv);
-    if (openFile) setTimeout(() => sendTask({ kind: 'open-apk', path: openFile }), 1500);
+    if (openFile) setTimeout(() => {
+      if (!openApkStandalone(openFile)) sendTask({ kind: 'open-apk', path: openFile });
+    }, 1200);
 
     // R3: автоподключение ТОЛЬКО если владелец явно включил его в настройках; при этом
     // подключается строго ОДНО устройство (последнее используемое / первое живое избранное)

@@ -232,8 +232,8 @@ a { color: var(--accent); }
 .dialog { display: flex; flex-direction: column; }
 .dialog-foot { position: sticky; bottom: -18px; background: var(--surface); padding: 12px 0 4px; margin-top: 14px; border-top: 1px solid var(--outline); z-index: 2; }
 .mirror-zone { display: flex; gap: 16px; align-items: flex-start; margin-top: 10px; flex-wrap: wrap; }
-.phone-frame { width: 250px; aspect-ratio: 9 / 19; background: #000; border: 2px solid var(--outline); border-radius: 22px; overflow: hidden; position: relative; flex: 0 0 auto; display: flex; align-items: center; justify-content: center; }
-.phone-frame canvas { width: 100%; height: 100%; object-fit: contain; display: block; }
+.phone-frame { width: fit-content; min-width: 210px; aspect-ratio: auto; background: #000; border: 2px solid var(--outline); border-radius: 22px; overflow: hidden; position: relative; flex: 0 0 auto; display: flex; align-items: center; justify-content: center; padding: 5px; }
+.phone-frame canvas { max-width: 238px; max-height: 62vh; width: auto; height: auto; object-fit: contain; display: block; }
 .phone-placeholder { text-align: center; padding: 12px; }
 .mirror-side { flex: 1; min-width: 220px; }
 
@@ -535,3 +535,86 @@ input[type="range"] { accent-color: var(--accent); }
 /* --- ассоциации: список расширений --- */
 #assoc-exts .assoc-ext { display: inline-block; font-family: var(--mono); font-size: 11.5px; padding: 2px 8px; margin: 0 4px 4px 0; border-radius: 8px; background: var(--surface-2); border: 1px solid var(--outline); }
 #assoc-exts .assoc-ext.on { border-color: color-mix(in srgb, var(--ok) 50%, var(--outline)); color: var(--ok); }
+
+/* ==================== v2.7.0 ==================== */
+
+/* --- вид «как в Проводнике»: список / значки / огромные значки --- */
+#fs-views .view-chip.active { border-color: var(--accent); color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, var(--surface)); }
+#fs-list.fs-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(122px, 1fr)); gap: 10px; }
+#fs-list.fs-grid .fs-cell { display: flex; flex-direction: column; align-items: center; gap: 6px; padding: 10px 6px 8px;
+  border: 1px solid var(--outline); border-radius: 14px; background: var(--surface-2); cursor: pointer; position: relative; }
+#fs-list.fs-grid .fs-cell:hover { border-color: color-mix(in srgb, var(--accent) 45%, var(--outline)); }
+#fs-list.fs-grid .fs-cell .fs-cell-ico { width: 64px; height: 64px; object-fit: contain; border-radius: 12px; flex: 0 0 auto; }
+#fs-list.fs-grid .fs-cell .fs-cell-name { font-size: 12px; text-align: center; word-break: break-word; max-height: 2.7em; overflow: hidden; line-height: 1.3; }
+#fs-list.fs-grid .fs-cell .fs-cell-sub { font-size: 10.5px; color: var(--text-2); text-align: center; }
+#fs-list.fs-grid .fs-cell .fs-cell-actions { display: flex; gap: 4px; flex-wrap: wrap; justify-content: center; margin-top: 2px; }
+#fs-list.fs-xl { grid-template-columns: repeat(auto-fill, minmax(168px, 1fr)); }
+#fs-list.fs-xl .fs-cell .fs-cell-ico { width: 140px; height: 140px; }
+.android-badge { position: absolute; right: 7px; bottom: 26px; width: 17px; height: 17px; border-radius: 50%; z-index: 2; }
+#fs-list.fs-grid .fs-cell .android-badge { right: 7px; top: 7px; bottom: auto; }
+
+/* --- карусель-плёнка в просмотрщике фото (как карточки «следующие» в Windows) --- */
+.filmstrip { display: flex; gap: 8px; overflow-x: auto; padding: 8px 2px 4px; scroll-behavior: smooth; }
+.filmstrip:empty { display: none; }
+.filmstrip .strip-card { flex: 0 0 auto; width: 76px; cursor: pointer; border: 2px solid transparent; border-radius: 10px;
+  padding: 3px; opacity: .72; background: var(--surface-2); transition: opacity .15s, border-color .15s; }
+.filmstrip .strip-card:hover { opacity: 1; }
+.filmstrip .strip-card.cur { border-color: var(--accent); opacity: 1; }
+.filmstrip .strip-card img { width: 68px; height: 68px; object-fit: cover; border-radius: 8px; display: block; background: #000; }
+.filmstrip .strip-card .strip-name { font-size: 9px; color: var(--text-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; display: block; margin-top: 2px; }
+.filmstrip .strip-card .strip-ph { width: 68px; height: 68px; border-radius: 8px; display: flex; align-items: center; justify-content: center; color: var(--text-2); font-size: 22px; }
+
+/* --- просмотр текста и PDF --- */
+.textview-dlg { width: 880px; }
+.textview-pre { margin: 8px 0 0; padding: 12px; background: var(--surface-2); border: 1px solid var(--outline);
+  border-radius: 12px; height: 56vh; overflow: auto; font-family: var(--mono); font-size: 12.5px; line-height: 1.5; white-space: pre; }
+.textview-pre.wrap { white-space: pre-wrap; word-break: break-word; }
+#pdfview-box { text-align: center; max-height: 56vh; overflow: auto; border: 1px solid var(--outline); border-radius: 12px; background: var(--surface-2); padding: 8px; }
+#pdfview-canvas { max-width: 100%; background: #fff; border-radius: 6px; box-shadow: 0 4px 18px rgba(0,0,0,.35); }
+
+/* --- плеер: строка навигации визуализаций --- */
+.media-visnav { display: flex; align-items: center; gap: 8px; margin-top: 8px; background: var(--surface-2);
+  border: 1px solid var(--outline); border-radius: 12px; padding: 6px 10px; flex-wrap: wrap; }
+.media-vis-name { font-weight: 700; font-size: 13px; min-width: 150px; text-align: center; color: var(--accent); }
+#media-vis { width: 100%; height: 240px; display: block; }
+.media-full .media-visnav { display: none; }
+
+/* --- во весь ЭКРАН (монитор) через Fullscreen API --- */
+.media-dlg:fullscreen, .media-dlg:-webkit-full-screen { width: 100vw; max-width: none; height: 100vh; max-height: none; border-radius: 0; background: #000; padding: 10px 14px; }
+.media-dlg:fullscreen .media-stage, .media-dlg:-webkit-full-screen .media-stage { height: calc(100vh - 208px); min-height: 0; }
+.media-dlg:fullscreen #media-el, .media-dlg:-webkit-full-screen #media-el { max-height: none; height: 100%; object-fit: contain; }
+.imgview-dlg:fullscreen, .imgview-dlg:-webkit-full-screen { width: 100vw; max-width: none; height: 100vh; max-height: none; border-radius: 0; background: #000; padding: 10px 14px; }
+.imgview-dlg:fullscreen .imgview-stage, .imgview-dlg:-webkit-full-screen .imgview-stage { height: calc(100vh - 150px); }
+
+/* --- диагностика: жёлтое состояние (предупреждение, не ошибка) --- */
+.diag .d-warn { color: #ffb300; }
+
+/* --- мини-окно APK (отдельное окно) --- */
+#mini-titlebar { display: flex; align-items: center; justify-content: space-between; padding: 10px 12px 8px;
+  -webkit-app-region: drag; -webkit-user-select: none; user-select: none; cursor: default; }
+#mini-titlebar .tb-btn { -webkit-app-region: no-drag; }
+#mini-body { padding: 0 16px 14px; overflow-y: auto; }
+.mini-head { display: flex; gap: 12px; align-items: center; margin: 4px 0 10px; }
+.mini-head img { width: 56px; height: 56px; border-radius: 14px; background: var(--surface-2); object-fit: contain; }
+.mini-head .mini-title { font-weight: 700; font-size: 15px; word-break: break-all; }
+.mini-head .mini-sub { font-size: 11.5px; color: var(--text-2); word-break: break-all; }
+.mini-progress { height: 6px; border-radius: 4px; background: var(--surface-2); overflow: hidden; margin-top: 8px; }
+.mini-progress .bar { height: 100%; width: 0; background: var(--accent); transition: width .3s; }
+
+/* --- бейджи Android в списке файлов и в свойствах --- */
+.fs-ico-wrap { position: relative; display: inline-flex; flex: 0 0 auto; }
+.fs-ico-wrap .android-badge { width: 13px; height: 13px; right: -5px; bottom: -4px; }
+.fsprop-ico-wrap { position: relative; display: inline-flex; flex: 0 0 auto; }
+.fsprop-ico-wrap .android-badge { width: 16px; height: 16px; right: -5px; bottom: -5px; }
+.proc-ico-wrap { width: 26px; height: 26px; flex: 0 0 auto; display: inline-flex; align-items: center; justify-content: center; }
+.proc-ico-wrap img { width: 24px; height: 24px; border-radius: 7px; object-fit: contain; }
+.proc-android { width: 19px; height: 19px; opacity: .9; }
+.proc-gear { color: var(--text-2); font-size: 15px; }
+#fs-list.fs-grid .fs-cell .android-badge { right: 7px; top: 7px; bottom: auto; }
+
+/* --- активные чипы-переключатели (процессы: все/только приложения) --- */
+.chip.active { border-color: var(--accent) !important; color: var(--accent) !important; background: color-mix(in srgb, var(--accent) 12%, var(--surface)); }
+
+/* --- отдельное мини-окно APK --- */
+body.mini-win { overflow: hidden; display: flex; flex-direction: column; }
+body.mini-win #mini-body { flex: 1; }

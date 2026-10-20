@@ -1393,9 +1393,12 @@ $('#btn-diag').onclick = async () => {
   const s = currentSerial();
   $('#diag-report').innerHTML = '<div class="muted">Выполняется…</div>';
   const rep = await window.api.toolDiagnostics(s);
-  const ico = ok => ok ? '<span style="color:var(--ok)">&#10004;</span>' : '<span style="color:var(--warn)">&#9888;</span>';
+  // v2.7.0: три состояния — ок (зелёный), предупреждение (жёлтый), ошибка (красный)
+  const ico = sec => sec.ok
+    ? (sec.warn ? '<span class="d-warn">&#9888;</span>' : '<span style="color:var(--ok)">&#10004;</span>')
+    : '<span style="color:var(--warn)">&#10008;</span>';
   $('#diag-report').innerHTML =
-    rep.sections.map(sec => `<div class="diag-sec"><b>${ico(sec.ok)} ${esc(sec.title)}</b><pre>${esc(sec.lines.join('\n'))}</pre></div>`).join('') +
+    rep.sections.map(sec => `<div class="diag-sec"><b>${ico(sec)} ${esc(sec.title)}</b><pre>${esc(sec.lines.join('\n'))}</pre></div>`).join('') +
     (rep.suggestions.length ? `<div class="diag-sugg"><b>Рекомендации</b><pre>${esc(rep.suggestions.map(x => '• ' + x).join('\n'))}</pre></div>` : '');
 };
 
@@ -1432,6 +1435,17 @@ function renderFsQuick() {
   box.innerHTML = FS_QUICK.map(q => `<button class="chip" data-qdir="${esc(q.dir)}">${esc(q.label)}</button>`).join('');
   box.querySelectorAll('[data-qdir]').forEach(b => b.onclick = () => fsNavigate(b.dataset.qdir));
 }
+// v2.7.0: переключатель вида (список / значки / огромные) — как в Проводнике Windows;
+// выбор запоминается и применяется сразу (перерисовка текущей папки)
+$$('#fs-views .view-chip').forEach(c => c.onclick = () => {
+  fsView = c.dataset.view;
+  try { localStorage.setItem('fs.view', fsView); } catch (e) {}
+  $$('#fs-views .view-chip').forEach(x => x.classList.toggle('active', x === c));
+  fsRender();
+});
+(function syncFsViewChips() {
+  $$('#fs-views .view-chip').forEach(x => x.classList.toggle('active', x.dataset.view === fsView));
+})();
 
 // навигация С историей: кнопка «Назад» возвращает на предыдущую папку (F5)
 function fsNavigate(newDir, { back } = {}) {
@@ -1459,6 +1473,68 @@ let fsSeq = 0; // защита от гонок: ответ устаревшег�
 const IMG_RE = /\.(jpe?g|png|gif|webp|bmp|heic|avif)$/i;
 const VID_RE = /\.(mp4|mkv|webm|avi|mov|3gp|m4v|ts)$/i;
 const AUD_RE = /\.(mp3|wav|ogg|oga|flac|m4a|aac|opus|wma)$/i;
+// v2.7.0: категории для новых просмотрщиков/действий
+const TXT_RE = /\.(txt|log|md|xml|json|js|css|htm|html|ini|conf|cfg|csv|nfo|srt|ass|ssa|lua|py|sh|bat|java|c|cpp|h|hpp|cs|yml|yaml|toml|properties|prop|rc|gitignore|sql|reg|vtt)$/i;
+const PDF_RE = /\.pdf$/i;
+const HTML_RE = /\.(html?|xhtml)$/i;
+const ARC_RE = /\.(zip|jar|tar|tar\.gz|tgz|tar\.bz2|tbz2|tar\.xz|rar|7z)$/i;
+const APK_RE = /\.(apk|apks|xapk|apkm)$/i;
+// v2.7.0: вид списка файлов (как в Проводнике): list | icons | xl — запоминаем между запусками
+let fsView = 'list';
+try { fsView = localStorage.getItem('fs.view') || 'list'; } catch (e) {}
+const thumbCache = new Map();     // путь → dataURL (миниатюры фото в режиме значков)
+const thumbFail = new Set();
+let thumbQueue = [], thumbRun = 0;
+const THUMB_CONC = 2;
+function queueThumbs(cells) { thumbQueue.push(...cells); pumpThumbs(); }
+function pumpThumbs() {
+  while (thumbRun < THUMB_CONC) {
+    const job = thumbQueue.shift();
+    if (!job) return;
+    thumbRun++;
+    loadThumb(job).finally(() => { thumbRun--; pumpThumbs(); });
+  }
+}
+async function loadThumb(job) {
+  const { path: p, el } = job;
+  if (thumbCache.has(p)) { el.src = thumbCache.get(p); return; }
+  if (thumbFail.has(p)) return;
+  const s = currentSerial(); if (!s) return;
+  try {
+    const r = await window.api.fsCat(s, p, 12);
+    if (!r.ok || !r.buf || !r.buf.length) { thumbFail.add(p); return; }
+    const blob = new Blob([r.buf], { type: /jpe?g$/i.test(p) ? 'image/jpeg' : /png$/i.test(p) ? 'image/png' : /gif$/i.test(p) ? 'image/gif' : /webp$/i.test(p) ? 'image/webp' : /bmp$/i.test(p) ? 'image/bmp' : 'image/jpeg' });
+    const url = URL.createObjectURL(blob);
+    await new Promise((res, rej) => { el.onload = res; el.onerror = rej; el.src = url; });
+    thumbCache.set(p, el.src);
+  } catch (e) { thumbFail.add(p); }
+}
+// отложенные иконки APK-файлов с телефона (родная иконка приложения) — очередь на 1 поток
+const fsApkIconDone = new Set();
+let fsApkQueue = [], fsApkRun = 0;
+function queueFsApkIcons(jobs) { fsApkQueue.push(...jobs); pumpFsApkIcons(); }
+function pumpFsApkIcons() {
+  while (fsApkRun < 1) {
+    const job = fsApkQueue.shift();
+    if (!job) return;
+    if (fsApkIconDone.has(job.path)) continue;
+    fsApkRun++;
+    (async () => {
+      const s = currentSerial(); if (!s) return;
+      const r = await window.api.apkRemoteMeta(s, job.path).catch(() => null);
+      fsApkIconDone.add(job.path);
+      if (r && r.ok && r.dataUrl) {
+        const img = document.getElementById(job.id);
+        if (img) { img.src = r.dataUrl; const b = document.getElementById(job.id + '-badge'); if (b) b.style.display = 'block'; }
+        if (r.label) { const t = document.getElementById(job.id + '-name'); if (t) t.textContent = r.label + ' (' + job.name + ')'; }
+      }
+    })().finally(() => { fsApkRun--; pumpFsApkIcons(); });
+  }
+}
+function fsBadgeHtml(isApk) {
+  return isApk ? '<img class="android-badge" src="' + window.FSICONS.ANDROID_BADGE + '" data-tip="Приложение Android — иконка подгружается из APK" alt="">'
+    : '';
+}
 async function fsRender() {
   const seq = ++fsSeq;
   const s = currentSerial();
@@ -1495,6 +1571,7 @@ async function fsRender() {
   if (q) items = items.filter(it => it.name.toLowerCase().includes(q));
   // v2.6: контекст флешки — кнопки «на флешку/на телефон» видны ТОЛЬКО когда флешка вставлена
   const onFlash = !!(fsFlash && fsDir.startsWith(fsFlash));
+  const full = (name) => fsDir.replace(/\/+$/, '') + '/' + name;
   const flashBtns = (name) => fsFlash ? (
     onFlash
       ? `<button class="btn btn-text btn-sm" data-fs2phone="${esc(name)}" data-tip="Скопировать на телефон в /sdcard/Download">На телефон</button>
@@ -1502,11 +1579,64 @@ async function fsRender() {
       : `<button class="btn btn-text btn-sm" data-fs2flash="${esc(name)}" data-tip="Скопировать на флешку (${esc(fsFlash)})">На флешку</button>
          <button class="btn btn-text btn-sm" data-fs2flashmv="${esc(name)}" data-tip="ПЕРЕМЕСТИТЬ на флешку (${esc(fsFlash)})">На флешку ✂</button>`
   ) : '';
-  box.innerHTML = items.map((it, i) => {
-    const ic = window.FSICONS.iconFor(it.name, it.dir);
-    const media = !it.dir && (IMG_RE.test(it.name) || VID_RE.test(it.name) || AUD_RE.test(it.name));
-    return `<div class="list-row fs-row">
-      <img class="fs-ico" src="${ic.src}" alt="" data-fsopen-i="${i}">
+
+  const bindCommon = (root) => {
+    const byIdx = i => items[i];
+    const openItem = (it) => {
+      if (it.dir) return fsNavigate(fsDir.replace(/\/+$/, '') + '/' + it.name);
+      const fp = full(it.name);
+      if (IMG_RE.test(it.name)) openImgViewer(fp);
+      else if (VID_RE.test(it.name) || AUD_RE.test(it.name)) openMediaPlayer(fp);
+      else if (TXT_RE.test(it.name) || PDF_RE.test(it.name)) openTextViewer(fp);
+      else if (HTML_RE.test(it.name)) openHtmlOnPc(fp, it.name);
+      else openFsProps(it);
+    };
+    root.querySelectorAll('[data-fsopen]').forEach(el => el.onclick = () => openItem(byIdx(+el.dataset.fsI)));
+    root.querySelectorAll('[data-fsopen-i]').forEach(el => el.onclick = () => openItem(byIdx(+el.dataset.fsopenI)));
+    root.querySelectorAll('[data-fsprop]').forEach(b => b.onclick = (e) => { e.stopPropagation(); openFsProps(byIdx(+(b.closest('[data-fs-i]') || b.closest('.fs-row')).querySelector('[data-fs-i]').dataset.fsI)); });
+    root.querySelectorAll('[data-fsget]').forEach(b => b.onclick = async (e) => {
+      e.stopPropagation();
+      snack('Скачиваю ' + b.dataset.fsget + '…');
+      const res = await window.api.fsPull(s, full(b.dataset.fsget));
+      if (res.ok) snack('Сохранено: ' + res.file);
+    });
+    const doTransfer = async (name, mv) => {
+      const src = full(name);
+      const dstDir = onFlash ? '/sdcard/Download' : (() => {
+        const rel = fsDir === fsFlash ? '' : fsDir.slice(fsFlash.length).replace(/^\/+/, '');
+        return fsFlash + (rel ? '/' + rel : '');
+      })();
+      const verb = mv ? 'Перемещаю' : 'Копирую';
+      snack(verb + ' ' + name + ' → ' + dstDir + '…');
+      await window.api.fsCmd(s, ['mkdir', '-p', dstDir]);
+      const r2 = await window.api.fsCmd(s, [mv ? 'mv' : 'cp', '-r', src, dstDir]);
+      if (r2.ok || /exists|such file/i.test(r2.stdout || '')) snack((mv ? 'Перемещено: ' : 'Скопировано: ') + name + ' → ' + dstDir);
+      else snack('Не удалось: ' + ((r2.stderr || r2.stdout || 'ошибка').slice(0, 120)));
+      fsRender();
+    };
+    root.querySelectorAll('[data-fs2flash]').forEach(b => b.onclick = (e) => { e.stopPropagation(); doTransfer(b.dataset.fs2flash, false); });
+    root.querySelectorAll('[data-fs2flashmv]').forEach(b => b.onclick = (e) => { e.stopPropagation(); doTransfer(b.dataset.fs2flashmv, true); });
+    root.querySelectorAll('[data-fs2phone]').forEach(b => b.onclick = (e) => { e.stopPropagation(); doTransfer(b.dataset.fs2phone, false); });
+    root.querySelectorAll('[data-fs2phonemv]').forEach(b => b.onclick = (e) => { e.stopPropagation(); doTransfer(b.dataset.fs2phonemv, true); });
+    root.querySelectorAll('[data-fsdel]').forEach(b => b.onclick = async (e) => {
+      e.stopPropagation();
+      const yes = await uiConfirm('Удаление', 'Удалить ' + b.dataset.fsdel + ' с устройства? (папки — с содержимым)');
+      if (!yes) return;
+      await window.api.fsCmd(s, ['rm', '-rf', full(b.dataset.fsdel)]);
+      fsRender(); snack('Удалено');
+    });
+  };
+
+  const thumbJobs = [], apkJobs = [];
+  if (fsView === 'list') {
+    box.classList.remove('fs-grid', 'fs-xl');
+    box.innerHTML = items.map((it, i) => {
+      const ic = window.FSICONS.iconFor(it.name, it.dir);
+      const isApk = !it.dir && APK_RE.test(it.name);
+      const media = !it.dir && (IMG_RE.test(it.name) || VID_RE.test(it.name) || AUD_RE.test(it.name));
+      if (isApk) apkJobs.push({ path: full(it.name), name: it.name, id: 'fsapk-' + i });
+      return `<div class="list-row fs-row">
+      <span class="fs-ico-wrap"><img class="fs-ico" src="${ic.src}" alt="" data-fsopen-i="${i}" id="fsapk-${i}">${fsBadgeHtml(isApk)}</span>
       <span class="mono grow2 fs-name" data-fsopen="${esc(it.name)}" data-isdir="${it.dir ? 1 : 0}" data-fs-i="${i}" style="cursor:pointer" data-tip="${it.dir ? 'Открыть папку' : (media ? 'Открыть в просмотрщике/плеере' : 'Двойной клик — свойства')}">${esc(it.name)}</span>
       <span class="muted fs-size">${it.dir ? '' : fmtBytes(it.size)}</span>
       <span class="muted fs-date">${esc(it.date || '')}</span>
@@ -1515,63 +1645,89 @@ async function fsRender() {
       ${flashBtns(it.name)}
       <button class="btn btn-text btn-sm" data-fsdel="${esc(it.name)}" data-tip="Удалить с телефона (папки — с содержимым)">Удалить</button>
     </div>`;
-  }).join('') || '<div class="empty">Папка пуста</div>';
-  const byIdx = i => items[i];
-  const openItem = (it) => {
-    if (it.dir) return fsNavigate(fsDir.replace(/\/+$/, '') + '/' + it.name);
-    const full = fsDir.replace(/\/+$/, '') + '/' + it.name;
-    if (IMG_RE.test(it.name)) openImgViewer(full);
-    else if (VID_RE.test(it.name) || AUD_RE.test(it.name)) openMediaPlayer(full);
-    else openFsProps(it);
-  };
-  box.querySelectorAll('[data-fsopen]').forEach(el => el.onclick = () => openItem(byIdx(+el.dataset.fsI)));
-  box.querySelectorAll('[data-fsopen-i]').forEach(el => el.onclick = () => openItem(byIdx(+el.dataset.fsopenI)));
-  box.querySelectorAll('[data-fsprop]').forEach(b => b.onclick = () => openFsProps(byIdx(+b.closest('.fs-row').querySelector('[data-fs-i]').dataset.fsI)));
-  box.querySelectorAll('[data-fsget]').forEach(b => b.onclick = async () => {
-    snack('Скачиваю ' + b.dataset.fsget + '…');
-    const res = await window.api.fsPull(s, fsDir.replace(/\/+$/, '') + '/' + b.dataset.fsget);
-    if (res.ok) snack('Сохранено: ' + res.file);
-  });
-  // v2.6: копирование/перемещение телефон ⟷ флешка (только когда флешка вставлена)
-  const flashTarget = () => {
-    if (onFlash) return '/sdcard/Download';
-    // на флешке кладём в такую же подпапку, если она там есть, иначе в корень флешки
-    const rel = fsDir === fsFlash ? '' : fsDir.slice(fsFlash.length).replace(/^\/+/, '');
-    return fsFlash + (rel ? '/' + rel : '');
-  };
-  const phoneTarget = () => '/sdcard/Download';
-  const doTransfer = async (name, mv) => {
-    const src = fsDir.replace(/\/+$/, '') + '/' + name;
-    const dstDir = onFlash ? phoneTarget() : flashTarget();
-    const verb = mv ? 'Перемещаю' : 'Копирую';
-    snack(verb + ' ' + name + ' → ' + dstDir + '…');
-    await window.api.fsCmd(s, ['mkdir', '-p', dstDir]);
-    const r = await window.api.fsCmd(s, [mv ? 'mv' : 'cp', '-r', src, dstDir]);
-    if (r.ok || /exists|such file/i.test(r.stdout || '')) snack((mv ? 'Перемещено: ' : 'Скопировано: ') + name + ' → ' + dstDir);
-    else snack('Не удалось: ' + ((r.stderr || r.stdout || 'ошибка').slice(0, 120)));
-    fsRender();
-  };
-  box.querySelectorAll('[data-fs2flash]').forEach(b => b.onclick = () => doTransfer(b.dataset.fs2flash, false));
-  box.querySelectorAll('[data-fs2flashmv]').forEach(b => b.onclick = () => doTransfer(b.dataset.fs2flashmv, true));
-  box.querySelectorAll('[data-fs2phone]').forEach(b => b.onclick = () => doTransfer(b.dataset.fs2phone, false));
-  box.querySelectorAll('[data-fs2phonemv]').forEach(b => b.onclick = () => doTransfer(b.dataset.fs2phonemv, true));
-  box.querySelectorAll('[data-fsdel]').forEach(b => b.onclick = async () => {
-    const yes = await uiConfirm('Удаление', 'Удалить ' + b.dataset.fsdel + ' с устройства? (папки — с содержимым)');
-    if (!yes) return;
-    await window.api.fsCmd(s, ['rm', '-rf', fsDir.replace(/\/+$/, '') + '/' + b.dataset.fsdel]);
-    fsRender(); snack('Удалено');
-  });
+    }).join('') || '<div class="empty">Папка пуста</div>';
+  } else {
+    // v2.7.0: значки / огромные значки — сетка как в Проводнике
+    const xl = fsView === 'xl';
+    box.classList.add('fs-grid'); box.classList.toggle('fs-xl', xl);
+    box.innerHTML = items.map((it, i) => {
+      const ic = window.FSICONS.iconFor(it.name, it.dir);
+      const isApk = !it.dir && APK_RE.test(it.name);
+      const isImg = !it.dir && IMG_RE.test(it.name);
+      const isVid = !it.dir && VID_RE.test(it.name);
+      const id = xl ? ('fscell-' + i) : null;
+      if (isImg && xl && it.size < 25 * 1024 * 1024) thumbJobs.push({ path: full(it.name), el: null, id: 'fscell-' + i });
+      if (isApk) apkJobs.push({ path: full(it.name), name: it.name, id: xl ? 'fscell-' + i : 'fscell-s-' + i });
+      return `<div class="fs-cell" data-fsopen="${esc(it.name)}" data-isdir="${it.dir ? 1 : 0}" data-fs-i="${i}" data-tip="${it.dir ? 'Открыть папку' : 'Клик — открыть, кнопки ниже — действия'}">
+      ${isImg && xl
+        ? '<img class="fs-cell-ico" id="fscell-' + i + '" src="' + ic.src + '" alt="">'
+        : '<span style="position:relative;display:inline-block"><img class="fs-cell-ico" id="' + (xl ? 'fscell-' + i : 'fscell-s-' + i) + '" src="' + ic.src + '" alt="">' + fsBadgeHtml(isApk) + '</span>'}
+      <span class="fs-cell-name" id="${(xl ? 'fscell-' : 'fscell-s-') + i}-name">${esc(it.name)}</span>
+      <span class="fs-cell-sub">${it.dir ? 'папка' : fmtBytes(it.size) + (isVid ? ' · видео' : isApk ? ' · приложение' : '')}</span>
+      <span class="fs-cell-actions" data-fs-i="${i}">
+        <button class="btn btn-text btn-sm" data-fsprop="${esc(it.name)}" data-isdir="${it.dir ? 1 : 0}" data-tip="Свойства">ℹ</button>
+        ${it.dir ? '' : '<button class="btn btn-text btn-sm" data-fsget="' + esc(it.name) + '" data-tip="Скачать на компьютер">⭳</button>'}
+        ${it.dir ? '' : '<button class="btn btn-text btn-sm" data-fsdel="' + esc(it.name) + '" data-tip="Удалить">✕</button>'}
+      </span>
+    </div>`;
+    }).join('') || '<div class="empty">Папка пуста</div>';
+  }
+  bindCommon(box);
+  if (thumbJobs.length) {
+    // миниатюры: подставляем реальные <img> после вставки разметки
+    for (const j of thumbJobs) { const el = document.getElementById(j.id); if (el) { j.el = el; queueThumbs([j]); } }
+  }
+  if (apkJobs.length) {
+    for (const j of apkJobs) { const el = document.getElementById(j.id); if (el) queueFsApkIcons([{ ...j, id: el.id }]); }
+  }
 }
 
-/* свойства файла/папки (F6) */
+/* свойства файла/папки (F6); v2.7.0: + распаковка архивов, открытие текста/PDF/HTML,
+   родная иконка и имя APK-файла с телефона, Android-бейдж на иконке */
 async function openFsProps(it) {
   const s = currentSerial();
   if (!s) return snack('Нет устройства');
   const full = (fsDir.replace(/\/+$/, '') + '/' + it.name);
+  const isApk = !it.dir && APK_RE.test(it.name);
   const ic = window.FSICONS.iconFor(it.name, it.dir);
+  // Android-бейдж в углу иконки для APK (требование владельца); обёртка идемпотентная
+  const imgEl = $('#fsprop-icon');
+  if (imgEl && !(imgEl.parentElement && imgEl.parentElement.classList.contains('fsprop-ico-wrap'))) {
+    const wrap = document.createElement('span');
+    wrap.className = 'fsprop-ico-wrap';
+    imgEl.replaceWith(wrap);
+    wrap.appendChild(imgEl);
+  }
+  const wrapEl = document.querySelector('#dlg-fsprop .fsprop-ico-wrap');
+  if (wrapEl) {
+    wrapEl.querySelectorAll('.android-badge').forEach(b => b.remove());
+    if (isApk) {
+      const b = document.createElement('img');
+      b.className = 'android-badge';
+      b.src = window.FSICONS.ANDROID_BADGE;
+      b.setAttribute('data-tip', 'Приложение Android');
+      wrapEl.appendChild(b);
+    }
+  }
   $('#fsprop-icon').src = ic.src;
   $('#fsprop-title').textContent = it.name;
   $('#fsprop-body').innerHTML = '<div class="muted">Читаю свойства…</div>';
+  // кнопки действий: очищаем и наполняем по типу
+  const foot = document.querySelector('#dlg-fsprop .dialog-foot');
+  foot.querySelectorAll('[data-v27]').forEach(b => b.remove());
+  const addBtn = (id, label, tip) => {
+    const b = document.createElement('button');
+    b.className = 'btn btn-tonal btn-sm'; b.id = id; b.textContent = label;
+    b.setAttribute('data-v27', '1'); b.setAttribute('data-tip', tip || '');
+    foot.insertBefore(b, foot.firstChild);
+    return b;
+  };
+  const openBtns = [];
+  if (!it.dir) {
+    if (TXT_RE.test(it.name) || PDF_RE.test(it.name)) openBtns.push(addBtn('btn-fsprop-open', TXT_RE.test(it.name) ? 'Открыть как текст' : 'Открыть PDF', 'Просмотр прямо в программе'));
+    if (HTML_RE.test(it.name)) openBtns.push(addBtn('btn-fsprop-html', 'Открыть в браузере', 'Скачает и откроет в системном браузере — со всеми скриптами и CDN'));
+    if (ARC_RE.test(it.name)) openBtns.push(addBtn('btn-fsprop-extract', 'Распаковать в папку', 'Распаковать архив в папку с именем архива, в эту же папку устройства'));
+  }
   openDlg('dlg-fsprop');
   const st = await window.api.fsStat(s, full);
   const isDir = it.dir || /directory/i.test(st.kind || '');
@@ -1588,6 +1744,33 @@ async function openFsProps(it) {
     ['Устройство', nameOf(s)]
   ].filter(Boolean);
   $('#fsprop-body').innerHTML = rows.map(r => '<div class="prop-row"><b>' + esc(r[0]) + ':</b><span>' + esc(r[1] || '—') + '</span></div>').join('');
+  // родная иконка/имя APK: тянем мету файла с телефона (кэшируется после первого раза)
+  if (isApk) {
+    const meta = await window.api.apkRemoteMeta(s, full).catch(() => null);
+    if (meta && meta.ok && meta.dataUrl) {
+      const img = $('#fsprop-icon'); if (img) img.src = meta.dataUrl;
+      if (meta.label || meta.package) {
+        $('#fsprop-body').insertAdjacentHTML('afterbegin',
+          '<div class="prop-row"><b>Приложение:</b><span>' + esc(meta.label || '—') + (meta.package ? ' · <span class="mono">' + esc(meta.package) + '</span>' : '') + (meta.versionName ? ' · v' + esc(meta.versionName) : '') + '</span></div>');
+      }
+    } else if (meta && meta.reason === 'big') {
+      $('#fsprop-body').insertAdjacentHTML('afterbegin', '<div class="prop-row"><b>Иконка приложения:</b><span>APK больше 80 МБ — для скорости не разбираю</span></div>');
+    }
+  }
+  for (const b of openBtns) {
+    if (b.id === 'btn-fsprop-open') b.onclick = () => { closeDlg('dlg-fsprop'); openTextViewer(full); };
+    if (b.id === 'btn-fsprop-html') b.onclick = () => { closeDlg('dlg-fsprop'); openHtmlOnPc(full, it.name); };
+    if (b.id === 'btn-fsprop-extract') b.onclick = async () => {
+      b.disabled = true; b.textContent = 'Распаковываю…';
+      const r = await window.api.fsExtract(s, full);
+      b.disabled = false; b.textContent = 'Распаковать в папку';
+      if (r.ok) {
+        snack('Распаковано (' + (r.where || 'на устройстве') + '): ' + r.files + ' файлов → ' + r.dest);
+        closeDlg('dlg-fsprop');
+        fsNavigate(r.dest);
+      } else snack(r.error || 'Не удалось распаковать');
+    };
+  }
   $('#btn-fsprop-folder').classList.toggle('hidden', !isDir);
   $('#btn-fsprop-folder').onclick = () => { closeDlg('dlg-fsprop'); if (isDir) fsNavigate(full); };
 }
@@ -1647,7 +1830,7 @@ async function ivLoad(full) {
   img.src = '';
   const token = { xhr: false };
   iv.loading = token;
-  const r = await window.api.fsCat(s, full);
+  const r = await window.api.fsCat(s, full, 64);
   if (iv.loading !== token) return;
   if (!r.ok) { msg.textContent = r.error || 'Не удалось загрузить файл'; return; }
   const blob = new Blob([r.buf], { type: /jpe?g$/i.test(full) ? 'image/jpeg' : /png$/i.test(full) ? 'image/png' : /gif$/i.test(full) ? 'image/gif' : /webp$/i.test(full) ? 'image/webp' : /bmp$/i.test(full) ? 'image/bmp' : 'image/png' });
@@ -1661,6 +1844,46 @@ async function ivLoad(full) {
   img.onerror = () => { msg.textContent = 'Формат не поддерживается встроенным просмотрщиком (например HEIC) — скачайте файл'; };
   img.src = url;
 }
+// v2.7.0: плёнка-карусель внизу просмотрщика — карточки изображений папки, как в Windows.
+// Клик по карточке = переход к этому фото; текущая подсвечена; миниатюры грузятся лениво.
+let stripThumbs = new Map(); // путь → dataURL (кэш на открытие папки)
+function ivStripCard(it, i) {
+  const cur = i === iv.idx ? ' cur' : '';
+  const p = fsDir.replace(/\/+$/, '') + '/' + it.name;
+  const cached = stripThumbs.get(p);
+  return `<div class="strip-card${cur}" data-strip="${i}" data-tip="${esc(it.name)}">
+    ${cached ? '<img src="' + cached + '" alt="">' : '<div class="strip-ph">&#128444;</div>'}
+    <span class="strip-name">${esc(it.name)}</span>
+  </div>`;
+}
+function ivRenderStrip() {
+  const strip = $('#imgview-strip');
+  if (!iv.list.length) { strip.innerHTML = ''; return; }
+  strip.innerHTML = iv.list.map((it, i) => ivStripCard(it, i)).join('');
+  strip.querySelectorAll('[data-strip]').forEach(c => c.onclick = () => {
+    const target = +c.dataset.strip;
+    ivNav(target - iv.idx);
+  });
+  const cur = strip.querySelector('.strip-card.cur');
+  if (cur) cur.scrollIntoView({ block: 'nearest', inline: 'center' });
+  // ленивые миниатюры: по 3 параллельно, только для карточек без кэша
+  const jobs = iv.list.map((it, i) => ({ it, i, p: fsDir.replace(/\/+$/, '') + '/' + it.name }))
+    .filter(j => !stripThumbs.has(j.p)).slice(0, 60);
+  let run = 0; let idx = 0;
+  const next = () => {
+    while (run < 3 && idx < jobs.length) {
+      const j = jobs[idx++];
+      run++;
+      window.api.fsCat(currentSerial(), j.p, 12).then(r => {
+        if (r.ok && r.buf && r.buf.length) {
+          const blob = new Blob([r.buf], { type: /jpe?g$/i.test(j.p) ? 'image/jpeg' : 'image/png' });
+          stripThumbs.set(j.p, URL.createObjectURL(blob));
+        }
+      }).catch(() => {}).finally(() => { run--; next(); if (run === 0) ivRenderStrip(); });
+    }
+  };
+  next();
+}
 async function openImgViewer(full) {
   iv.list = ivImageList();
   const name = full.split('/').pop();
@@ -1670,6 +1893,7 @@ async function openImgViewer(full) {
   iv.scale = 1; iv.tx = 0; iv.ty = 0; iv.rot = 0; ivApply();
   openDlg('dlg-imgview');
   ivLoad(full);
+  ivRenderStrip();
 }
 function ivNav(d) {
   if (!iv.list.length) return;
@@ -1680,6 +1904,17 @@ function ivNav(d) {
   $('#imgview-pos').textContent = (iv.idx + 1) + '/' + iv.list.length;
   iv.scale = 1; iv.tx = 0; iv.ty = 0; iv.rot = 0; ivApply();
   ivLoad(full);
+  ivRenderStrip();
+}
+// v2.7.0: второй полноэкранный режим — реальный фулскрин монитора через Fullscreen API
+function toggleMonitorFullscreen(el) {
+  try {
+    if (document.fullscreenElement || document.webkitFullscreenElement) {
+      (document.exitFullscreen || document.webkitExitFullscreen).call(document);
+    } else {
+      (el.requestFullscreen || el.webkitRequestFullscreen).call(el);
+    }
+  } catch (e) { snack('Полноэкранный режим не поддержался: ' + (e.message || e)); }
 }
 (function ivEvents() {
   const stage = $('#imgview-stage');
@@ -1707,14 +1942,118 @@ function ivNav(d) {
   $('#imgview-prev').onclick = () => ivNav(-1);
   $('#imgview-next').onclick = () => ivNav(1);
   $('#imgview-full').onclick = () => $('#imgview-shell').classList.toggle('imgview-full');
+  $('#imgview-fullmon').onclick = () => toggleMonitorFullscreen($('#imgview-shell'));
 })();
 
-/* ---------- v2.6: медиаплеер (видео+аудио) с 10-полосным эквалайзером и визуализацией ---------- */
+/* ================= v2.7.0: просмотр текстовых файлов (все форматы) и PDF ================= */
+const tv = { full: null, isPdf: false, pdfDoc: null, pdfPage: 1, pdfLibLoading: false };
+async function openTextViewer(full) {
+  const s = currentSerial(); if (!s) return;
+  tv.full = full;
+  tv.isPdf = PDF_RE.test(full);
+  const name = full.split('/').pop();
+  $('#textview-title').textContent = name;
+  $('#textview-status').textContent = full;
+  $('#textview-pos').textContent = '';
+  $('#textview-pre').classList.toggle('hidden', tv.isPdf);
+  $('#pdfview-box').classList.toggle('hidden', !tv.isPdf);
+  openDlg('dlg-textview');
+  if (tv.isPdf) return loadPdf(full);
+  const pre = $('#textview-pre');
+  pre.textContent = 'Загрузка…';
+  const r = await window.api.fsCat(s, full, 8);
+  if (!r.ok) {
+    pre.textContent = '';
+    $('#textview-status').textContent = r.error || 'Не удалось загрузить файл';
+    if (r.capped) snack('Файл больше 8 МБ — показывать целиком не буду. Кнопка «Скачать» внизу работает.');
+    return;
+  }
+  // декодирование: UTF-8, при сбое — windows-1251 (файлы с русским текстом в 866/1251)
+  let text;
+  try { text = new TextDecoder('utf-8', { fatal: true }).decode(r.buf); }
+  catch (e) { try { text = new TextDecoder('windows-1251').decode(r.buf); } catch (e2) { text = r.buf.toString('latin1'); } }
+  if (text.length > 400000) { text = text.slice(0, 400000); $('#textview-pos').textContent = '(показаны первые 400 000 символов)'; }
+  pre.textContent = text;
+  $('#textview-status').textContent = full + ' · ' + fmtBytesLong(r.bytes || 0);
+}
+async function loadPdf(full) {
+  const s = currentSerial(); if (!s) return;
+  $('#pdfview-page').textContent = 'загрузка…';
+  if (!window.pdfjsLib) {
+    if (tv.pdfLibLoading) return;
+    tv.pdfLibLoading = true;
+    try {
+      await new Promise((res, rej) => {
+        const sc = document.createElement('script');
+        sc.src = 'lib/pdf.min.js'; sc.onload = res; sc.onerror = () => rej(new Error('не удалось загрузить pdf.js'));
+        document.head.appendChild(sc);
+      });
+      if (window.pdfjsLib && window.pdfjsLib.GlobalWorkerOptions) {
+        window.pdfjsLib.GlobalWorkerOptions.workerSrc = 'lib/pdf.worker.min.js';
+      }
+    } catch (e) {
+      tv.pdfLibLoading = false;
+      $('#pdfview-page').textContent = 'pdf.js не загрузился — нажмите «Открыть на ПК»';
+      return;
+    }
+    tv.pdfLibLoading = false;
+  }
+  try {
+    const r = await window.api.fsCat(s, full, 128);
+    if (!r.ok) { $('#pdfview-page').textContent = r.error || 'не удалось загрузить'; return; }
+    tv.pdfDoc = await window.pdfjsLib.getDocument({ data: r.buf }).promise;
+    tv.pdfPage = 1;
+    renderPdfPage();
+  } catch (e) {
+    $('#pdfview-page').textContent = 'Не удалось открыть PDF: ' + (e.message || e).slice(0, 80);
+  }
+}
+async function renderPdfPage() {
+  if (!tv.pdfDoc) return;
+  const page = await tv.pdfDoc.getPage(Math.min(tv.pdfPage, tv.pdfDoc.numPages));
+  const box = $('#pdfview-box');
+  const scale = Math.min(1.6, (box.clientWidth - 40) / page.getViewport({ scale: 1 }).width);
+  const vp = page.getViewport({ scale: Math.max(0.4, scale) });
+  const cv = $('#pdfview-canvas');
+  cv.width = vp.width; cv.height = vp.height;
+  await page.render({ canvasContext: cv.getContext('2d'), viewport: vp }).promise;
+  $('#pdfview-page').textContent = tv.pdfPage + ' / ' + tv.pdfDoc.numPages;
+}
+$('#pdfview-prev').onclick = async () => { if (tv.pdfDoc && tv.pdfPage > 1) { tv.pdfPage--; await renderPdfPage(); } };
+$('#pdfview-next').onclick = async () => { if (tv.pdfDoc && tv.pdfPage < tv.pdfDoc.numPages) { tv.pdfPage++; await renderPdfPage(); } };
+$('#textview-wrap').onclick = () => $('#textview-pre').classList.toggle('wrap');
+$('#textview-dl').onclick = async () => {
+  if (!tv.full) return;
+  const res = await window.api.fsPull(currentSerial(), tv.full);
+  if (res.ok) snack('Сохранено: ' + res.file);
+};
+$('#textview-openpc').onclick = async () => {
+  if (!tv.full) return;
+  snack('Скачиваю и открываю системной программой…');
+  const r = await window.api.fsOpenOnPc(currentSerial(), tv.full);
+  snack(r.ok ? 'Открыто на компьютере' : (r.error || 'Не удалось'));
+};
+// v2.7.0: HTML-файлы с телефона открываются в СИСТЕМНОМ браузере — там работают и CDN-скрипты
+// (триjs-анимации владельца), и весь JS. Встроенный iframe был бы зажат CSP и без сети.
+async function openHtmlOnPc(full, name) {
+  const s = currentSerial(); if (!s) return;
+  const yes = await uiConfirm('Открыть HTML в браузере', '«' + name + '» будет скачан во временную папку и открыт в системном браузере — так работают все скрипты, стили и CDN. Открыть?');
+  if (!yes) return;
+  snack('Скачиваю и открываю в браузере…');
+  const r = await window.api.fsOpenOnPc(s, full);
+  snack(r.ok ? 'Открыто в системном браузере: ' + name : (r.error || 'Не удалось'));
+}
+
+/* ---------- v2.6→v2.7: медиаплеер (видео+аудио), эквалайзер, 10 визуализаций ----------
+   v2.7.0: визуализации из window.VISLIB (в т.ч. по мотивам анимаций владельца), с номерами
+   и названиями, листаются стрелками ◀ ▶, выбор запоминается между запусками; анимация живёт
+   ВСЕГДА, пока открыт плеер, а при воспроизведении реагирует на звук через анализатор. */
 const mp = {
   list: [], idx: 0, isVideo: false,
   ctx: null, src: null, analyser: null, filters: [], out: null,
-  visMode: 'bars', raf: 0, loadedUrl: null, wantPlay: true
+  visIdx: 0, raf: 0, loadedUrl: null, wantPlay: true
 };
+try { mp.visIdx = Math.min(window.VISLIB.length - 1, Math.max(0, parseInt(localStorage.getItem('media.vis') || '0', 10) || 0)); } catch (e) {}
 const EQ_FREQS = [31, 62, 125, 250, 500, 1000, 2000, 4000, 8000, 16000];
 const EQ_PRESETS = {
   'Плоско': [0,0,0,0,0,0,0,0,0,0],
@@ -1770,62 +2109,45 @@ function mpBuildEq() {
   $('#eq-presets').innerHTML = Object.keys(EQ_PRESETS).map(p => `<button class="chip" data-eqp="${esc(p)}" style="padding:4px 10px;font-size:12px">${esc(p)}</button>`).join('');
   $('#eq-presets').querySelectorAll('[data-eqp]').forEach(b => b.onclick = () => mpApplyEq(EQ_PRESETS[b.dataset.eqp]));
 }
+function mpVisLabel() {
+  $('#media-vis-name').textContent = (mp.visIdx + 1) + '. ' + (window.VISLIB[mp.visIdx] || {}).name;
+}
+function mpVisNav(d) {
+  mp.visIdx = (mp.visIdx + d + window.VISLIB.length) % window.VISLIB.length;
+  try { localStorage.setItem('media.vis', String(mp.visIdx)); } catch (e) {}
+  mpVisLabel();
+  snd.play('click');
+}
 function mpDraw() {
   if ($('#dlg-media').classList.contains('hidden')) { mp.raf = 0; return; }
   mp.raf = requestAnimationFrame(mpDraw);
   const cv = $('#media-vis'), ctx = cv.getContext('2d');
   const W = cv.width, H = cv.height;
-  ctx.clearRect(0, 0, W, H);
-  let bass = 0;
+  // данные анализатора → амплитуды; на паузе спектр затухает к нулю, но ВРЕМЯ идёт —
+  // поэтому каждая анимация продолжает жить (требование владельца)
+  const a = { bass: 0, mid: 0, treble: 0, energy: 0, spectrum: [], wave: [] };
   if (mp.analyser) {
     const n = mp.analyser.frequencyBinCount;
     const fd = new Uint8Array(n), td = new Uint8Array(n);
     mp.analyser.getByteFrequencyData(fd);
     mp.analyser.getByteTimeDomainData(td);
-    for (let i = 0; i < 8; i++) bass += fd[i];
-    bass = bass / (8 * 255);
-    const playing = !$('#media-el').paused;
-    if (mp.visMode === 'bars') {
-      const bars = 48, step = Math.floor(n / bars);
-      for (let i = 0; i < bars; i++) {
-        let v = 0; for (let k = 0; k < step; k++) v = Math.max(v, fd[i * step + k]);
-        const h = (v / 255) * (H - 18) + 2;
-        const x = i * (W / bars) + 2, w = W / bars - 3;
-        const g = ctx.createLinearGradient(0, H, 0, H - h);
-        g.addColorStop(0, '#1976d2'); g.addColorStop(0.6, '#4fc3f7'); g.addColorStop(1, '#b388ff');
-        ctx.fillStyle = g;
-        ctx.beginPath(); ctx.roundRect(x, H - h, w, h, 3); ctx.fill();
-      }
-    } else if (mp.visMode === 'wave') {
-      ctx.lineWidth = 2.4; ctx.strokeStyle = '#4fc3f7';
-      ctx.shadowColor = 'rgba(79,195,247,.8)'; ctx.shadowBlur = 12;
-      ctx.beginPath();
-      for (let i = 0; i < n; i++) {
-        const x = i / (n - 1) * W;
-        const y = H / 2 + ((td[i] - 128) / 128) * (H / 2 - 8);
-        i ? ctx.lineTo(x, y) : ctx.moveTo(x, y);
-      }
-      ctx.stroke(); ctx.shadowBlur = 0;
-    } else {
-      const cx = W / 2, cy = H / 2, R = Math.min(W, H) * 0.28 + bass * 40;
-      ctx.lineWidth = 2;
-      for (let i = 0; i < 72; i++) {
-        const v = fd[i * 2] / 255;
-        const a = (i / 72) * Math.PI * 2;
-        const r1 = R + 6, r2 = R + 6 + v * 70;
-        ctx.strokeStyle = `hsl(${200 + v * 90}, 80%, ${45 + v * 25}%)`;
-        ctx.beginPath();
-        ctx.moveTo(cx + Math.cos(a) * r1, cy + Math.sin(a) * r1);
-        ctx.lineTo(cx + Math.cos(a) * r2, cy + Math.sin(a) * r2);
-        ctx.stroke();
-      }
-      ctx.beginPath(); ctx.arc(cx, cy, R, 0, Math.PI * 2);
-      ctx.strokeStyle = 'rgba(79,195,247,.55)'; ctx.stroke();
-    }
-    // 3D-куб подпрыгивает в такт басам
-    const cube = $('#media-3dwrap');
-    if (cube) cube.style.transform = `scale(${(1 + bass * 0.35).toFixed(3)}) translateY(${(-bass * 10).toFixed(1)}px)`;
+    a.spectrum = fd; a.wave = td;
+    let b = 0, m = 0, tr = 0;
+    for (let i = 0; i < 8; i++) b += fd[i];
+    for (let i = 8; i < 60; i++) m += fd[i];
+    for (let i = 60; i < Math.min(n, 200); i++) tr += fd[i];
+    a.bass = b / (8 * 255); a.mid = m / (52 * 255); a.treble = tr / (Math.min(n, 200) - 60) / 255;
+    a.energy = a.bass * 0.5 + a.mid * 0.35 + a.treble * 0.15;
+  } else {
+    // плеер ещё не инициализирован — спокойное дыхание амплитуд
+    const t = performance.now() / 1000;
+    a.bass = 0.14 + 0.06 * Math.sin(t * 1.1);
+    a.mid = 0.1 + 0.05 * Math.sin(t * 0.7 + 2);
+    a.treble = 0.08 + 0.04 * Math.sin(t * 1.9 + 4);
+    a.energy = a.bass * 0.6 + a.mid * 0.4;
   }
+  const vis = window.VISLIB[mp.visIdx];
+  if (vis) { try { vis.draw(ctx, W, H, performance.now() / 1000, a); } catch (e) {} }
 }
 async function mpLoad(full) {
   const s = currentSerial(); if (!s) return;
@@ -1848,10 +2170,19 @@ async function mpLoad(full) {
   mp.loadedUrl = URL.createObjectURL(new Blob([r.buf], { type: mime }));
   el.src = mp.loadedUrl;
   el.volume = (+$('#media-vol').value || 80) / 100;
-  $('#media-now-sub').textContent = (mp.isVideo ? 'Видео' : 'Аудио') + ' · ' + fmtBytesLong(r.bytes || 0);
+  $('#media-now-sub').textContent = (mp.isVideo ? 'Видео' : 'Аудио') + ' · ' + fmtBytesLong(r.bytes || 0) + ' — запускаю…';
   mpEnsureAudio();
   if (mp.ctx && mp.ctx.state === 'suspended') { try { await mp.ctx.resume(); } catch (e) {} }
-  try { await el.play(); } catch (e) {}
+  try { el.load(); } catch (e) {}
+  try {
+    await el.play();
+    $('#media-now-sub').textContent = (mp.isVideo ? 'Видео' : 'Аудио') + ' · ' + fmtBytesLong(r.bytes || 0);
+  } catch (e) {
+    // v2.7.0: автовоспроизведение разблокировано в main (autoplay-policy), но если кодек всё же
+    // не взялся — честно сообщаем и оставляем кнопки «Скачать» и «На ПК» под рукой
+    $('#media-now-sub').textContent = 'Не удалось запустить автоматически — нажмите ▶ или «На ПК»';
+    try { await el.play(); } catch (e2) {}
+  }
 }
 async function openMediaPlayer(full) {
   mp.list = mediaList();
@@ -1859,6 +2190,7 @@ async function openMediaPlayer(full) {
   mp.idx = Math.max(0, mp.list.findIndex(x => x.name === name));
   openDlg('dlg-media');
   mpBuildEq();
+  mpVisLabel();
   if (!mp.raf) mp.raf = requestAnimationFrame(mpDraw);
   mpLoad(full);
 }
@@ -1877,25 +2209,46 @@ function mpNav(d) {
   };
   el.onplay = () => $('#media-play').textContent = '⏸';
   el.onpause = () => $('#media-play').textContent = '▶';
+  el.onloadeddata = () => { $('#media-now-sub').textContent = (mp.isVideo ? 'Видео' : 'Аудио') + ' · готово'; };
   el.ontimeupdate = () => {
     $('#media-time').textContent = mpFmtTime(el.currentTime) + ' / ' + mpFmtTime(el.duration);
     if (el.duration) $('#media-seek').value = Math.round(el.currentTime / el.duration * 1000);
   };
   el.onended = () => mpNav(1);
-  el.onerror = () => { $('#media-now-sub').textContent = 'Этот формат браузер не играет (например mkv с редким кодеком) — скачайте файл'; };
+  el.onerror = () => {
+    $('#media-now-sub').textContent = 'Этот формат/кодек браузер не играет (например mkv с редким кодеком) — нажмите «На ПК», там проиграет системный плеер';
+    $('#media-status').textContent = 'Кодек не поддержан Chromium. Кнопки «Скачать» и «На ПК» выше — рабочие.';
+  };
   $('#media-seek').oninput = () => { if (el.duration) el.currentTime = (+$('#media-seek').value / 1000) * el.duration; };
   $('#media-vol').oninput = () => { el.volume = (+$('#media-vol').value) / 100; };
   $('#media-prev').onclick = () => mpNav(-1);
   $('#media-next').onclick = () => mpNav(1);
   $('#media-eqbtn').onclick = () => { mpEnsureAudio(); $('#media-eq').classList.toggle('hidden'); };
+  // v2.7.0: «Скачать» и «Скачать и открыть системным плеером» — для любых непроигрываемых форматов
+  $('#media-dl').onclick = async () => {
+    const f = mp.list[mp.idx]; if (!f) return;
+    const res = await window.api.fsPull(currentSerial(), fsDir.replace(/\/+$/, '') + '/' + f.name);
+    if (res.ok) snack('Сохранено: ' + res.file);
+  };
+  $('#media-openpc').onclick = async () => {
+    const f = mp.list[mp.idx]; if (!f) return;
+    snack('Скачиваю и открываю системным плеером…');
+    const r = await window.api.fsOpenOnPc(currentSerial(), fsDir.replace(/\/+$/, '') + '/' + f.name);
+    snack(r.ok ? 'Открыто в системном плеере' : (r.error || 'Не удалось'));
+  };
+  // v2.7.0: две кнопки полного экрана — внутри программы И на весь монитор
   $('#media-full').onclick = () => $('#dlg-media .media-dlg').classList.toggle('media-full');
-  $$('.eq-vchip').forEach(c => c.onclick = () => { $$('.eq-vchip').forEach(x => x.classList.toggle('active', x === c)); mp.visMode = c.dataset.vis; });
+  $('#media-fullmon').onclick = () => toggleMonitorFullscreen($('#dlg-media .media-dlg'));
+  // v2.7.0: стрелки навигации визуализаций (номер + название, выбор запоминается)
+  $('#media-vis-prev').onclick = () => mpVisNav(-1);
+  $('#media-vis-next').onclick = () => mpVisNav(1);
   document.addEventListener('keydown', e => {
     if ($('#dlg-media').classList.contains('hidden')) return;
     if (e.target && /INPUT|SELECT|TEXTAREA/.test(e.target.tagName)) return;
     if (e.code === 'Space') { e.preventDefault(); $('#media-play').click(); }
-    if (e.key === 'ArrowLeft') mpNav(-1);
-    if (e.key === 'ArrowRight') mpNav(1);
+    if (e.key === 'ArrowLeft') { if (e.shiftKey) mpVisNav(-1); else mpNav(-1); }
+    if (e.key === 'ArrowRight') { if (e.shiftKey) mpVisNav(1); else mpNav(1); }
+    if (e.key === 'v' || e.key === 'V' || e.key === 'м' || e.key === 'М') mpVisNav(1);
   });
   // просмотрщик: стрелки листают фото
   document.addEventListener('keydown', e => {
@@ -2015,12 +2368,20 @@ function appSub(pkg) {
   if (state.config.showPkgNames) return appLabels[pkg] || '';
   return pkg;
 }
+// v2.7.0: вкладка процессов — фильтр «все/только приложения» + ИКОНКИ процессов.
+// Иконки берём ТОЛЬКО из кэша (apps:icon-peek — без скачивания APK); если иконки нет —
+// у приложений зелёный Android-робот, у системных служб — шестерёнка. Кто в списке «Приложений»
+// уже показывался с иконкой — получит её и здесь мгновенно.
+let procTab = 'all';
+let procIconsRendered = new Set();
 async function procsRender() {
   const s = currentSerial(); if (!s) return;
   const r = await window.api.procsList(s);
   const q = ($('#apps-search').value || '').toLowerCase();
   const isApp = x => /^(com|org|net|ru|io)\./.test(x.name);
   let items = (r.items || []).slice();
+  // v2.7.0: фильтр пользовательских процессов (кнопка-чип над списком)
+  if (procTab === 'user') items = items.filter(x => isApp(x));
   // v2.6: приложения — наверх; сортировка из селекта (имя/память)
   if (appsSort === 'mem_desc') items.sort((a, b) => (isApp(b) - isApp(a)) || (b.rss - a.rss));
   else items.sort((a, b) => (isApp(b) - isApp(a)) || a.name.localeCompare(b.name));
@@ -2031,19 +2392,27 @@ async function procsRender() {
     return FB;
   };
   const appCount = items.filter(isApp).length;
-  // v2.6: одна компактная строка статуса + кнопка «Завершить все приложения» (дубли убраны)
-  $('#apps-counts').innerHTML = '<span class="count-chip">Процессов: <b>' + items.length + '</b></span>' +
-    '<span class="count-chip cc-user">Приложений: <b>' + appCount + '</b></span>' +
-    '<span class="muted small">приложения — наверху списка</span>';
+  // v2.7.0: строка статуса + чип фильтра «Только пользовательские приложения»
+  $('#apps-counts').innerHTML = '<button class="chip' + (procTab === 'all' ? ' view-chip active' : '') + '" id="proc-tab-all" data-tip="Показать все процессы — и приложения, и системные службы">Все процессы</button>' +
+    '<button class="chip' + (procTab === 'user' ? ' view-chip active' : '') + '" id="proc-tab-user" data-tip="Показать ТОЛЬКО процессы пользовательских приложений">Только приложения</button>' +
+    '<span class="count-chip">Показано: <b>' + items.length + '</b></span>' +
+    '<span class="count-chip cc-user">Приложений: <b>' + appCount + '</b></span>';
+  const tabAll = document.getElementById('proc-tab-all'), tabUser = document.getElementById('proc-tab-user');
+  if (tabAll) tabAll.onclick = () => { procTab = 'all'; procsRender(); };
+  if (tabUser) tabUser.onclick = () => { procTab = 'user'; procsRender(); };
   $('#btn-killall-procs').classList.remove('hidden');
   $('#apps-list').innerHTML = items.slice(0, 400).map(x => {
-    const isApp = /^com\.|^org\.|^net\.|^ru\./.test(x.name);
+    const app = /^(com\.|^org\.|^net\.|^ru\.)/.test(x.name);
     const d = descFor(x.name);
+    const safeId = 'pico-' + x.name.replace(/[^a-z0-9]/gi, '_') + '-' + x.pid;
     return `<div class="list-row proc-row">
+      <span class="proc-ico-wrap" id="${safeId}" data-tip="${app ? 'Иконка приложения — берётся из кэша APK' : 'Системная служба Android'}">${app
+        ? '<img class="proc-android" src="' + window.FSICONS.ANDROID_BADGE + '" alt="">'
+        : '<span class="proc-gear">⚙</span>'}</span>
       <span class="mono muted proc-pid">${x.pid}</span>
       <span class="proc-main grow2"><span class="proc-name">${esc(x.name)}</span><span class="proc-desc muted small">${esc(d)}</span></span>
       <span class="muted small proc-rss" data-tip="Память, занятая процессом">${x.rss ? fmtBytes(x.rss * 1024) : '—'}</span>
-      ${isApp ? '<span class="st-chip st-online proc-kind" data-tip="Это процесс приложения">приложение</span>' : '<span class="st-chip st-off proc-kind" data-tip="Системная служба Android — трогать не стоит">система</span>'}
+      ${app ? '<span class="st-chip st-online proc-kind" data-tip="Это процесс приложения">приложение</span>' : '<span class="st-chip st-off proc-kind" data-tip="Системная служба Android — трогать не стоит">система</span>'}
       <button class="btn btn-text btn-sm" data-kill="${x.pid}" data-tip="Принудительно остановить процесс (kill -9). Служба может перезапуститься, приложение — потеряет несохранённое">Убить</button>
     </div>`;
   }).join('') || '<div class="empty">Нет процессов</div>';
@@ -2054,6 +2423,19 @@ async function procsRender() {
     snack(res.ok ? 'Процесс остановлен' : ('Ошибка: ' + (res.message || '')));
     procsRender();
   });
+  // v2.7.0: иконки процессов из кэша (без скачивания APK); не найдено — остаётся робот/шестерёнка
+  procIconsRendered.clear();
+  for (const x of items.slice(0, 120).filter(y => /^(com|org|net|ru)\./.test(y.name))) {
+    const id = 'pico-' + x.name.replace(/[^a-z0-9]/gi, '_') + '-' + x.pid;
+    if (procIconsRendered.has(x.name)) continue;
+    procIconsRendered.add(x.name);
+    window.api.appsIconPeek(x.name).then(rr => {
+      if (rr && rr.ok && rr.dataUrl) {
+        const el = document.getElementById(id);
+        if (el) el.innerHTML = '<img src="' + rr.dataUrl + '" style="width:24px;height:24px;border-radius:7px;display:block;object-fit:contain" alt="">';
+      }
+    }).catch(() => {});
+  }
 }
 function appsRender() {
   if (!appsData) return;

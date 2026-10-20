@@ -148,36 +148,69 @@ async function run(s, deps) {
   sendStatus('connected', 'Подключено: ' + (model || serial), { host, port: parseInt(portStr, 10) || 5555, model });
 }
 
+// v2.7.0: фаза подключения ПОСЛЕ сопряжения полностью переписана — раньше здесь было
+// две беды: (1) полный свип 15 000 портов (~24 с) стартовал только ПОСЛЕ 30-секундного
+// бесплодного цикла mDNS-опросов, (2) каждый раунд делал sleep(1200) + медленные adb-вызовы.
+// Теперь: свип запускается ПЕРВЫМ ДЕЛОМ с ранним выходом (первый открытый порт находится
+// за ~1–2 с), параллельно опрашивается adb devices (автоподключение), найденные порты
+// пробуются подключением немедленно. Типичное время «Подключение…»: 3–8 секунд.
 async function connectPhase(s, host, log) {
   const t0 = Date.now();
-  while (!s.cancelled && Date.now() - t0 < CONNECT_TIMEOUT_MS) {
-    await sleep(1200);
-    // adb auto-connect мог уже подключить устройство
-    const d = await adb.devices().catch(() => ({ ok: false, list: [] }));
-    for (const dev of (d.list || [])) {
-      if (dev.state === 'device' && dev.serial.startsWith(host + ':')) return dev.serial;
+  let stopped = false;
+  // (1) быстрый свип портов — запускаем сразу, он и есть главный источник кандидатов
+  const scanP = adb.portScanFast(host).catch(() => []);
+  // (2) параллельно: adb мог уже сам подключить устройство после сопряжения
+  const pollP = (async () => {
+    while (!stopped && !s.cancelled && Date.now() - t0 < CONNECT_TIMEOUT_MS) {
+      const d = await adb.devices().catch(() => ({ ok: false, list: [] }));
+      for (const dev of (d.list || [])) {
+        if (dev.state === 'device' && dev.serial.startsWith(host + ':')) return dev.serial;
+      }
+      await sleep(800);
     }
-    // ищем TLS-порт отладки этого IP по mDNS (свой клиент + adb mdns)
-    const recs = await mdns.discover(900).catch(() => []);
-    const all = (recs || []).concat((await adb.mdnsServices().catch(() => ({ items: [] }))).items || []);
-    const conn = all.find(r => String(r.service || '').includes('_adb-tls-connect') && r.host === host && r.port);
-    if (conn) {
-      log('connect try', host + ':' + conn.port);
-      const c = await adb.connect(host, conn.port);
-      if (c.ok) return host + ':' + conn.port;
-    }
-  }
-  if (s.cancelled) return null;
-  // последний шанс: свип портов беспроводной отладки по этому хосту
-  try {
-    const ports = await adb.portRangeScan(host);
-    for (const p of ports.slice(0, 6)) {
+    return null;
+  })();
+  const tried = new Set();
+  const tryPort = async (p) => {
+    if (!p || tried.has(p)) return null;
+    tried.add(p);
+    try {
       const c = await adb.connect(host, p);
       if (c.ok) return host + ':' + p;
+    } catch (e) {}
+    return null;
+  };
+  // ГОНКА источников: кто первый даст рабочий serial — тот и выигрывает
+  let serial = null;
+  while (!s.cancelled && !serial && Date.now() - t0 < CONNECT_TIMEOUT_MS) {
+    const winner = await Promise.race([
+      pollP.then(r => (r ? { type: 'poll', serial: r } : null)),
+      scanP.then(ports => ({ type: 'scan', ports })),
+      sleep(500).then(() => null)
+    ]);
+    if (!winner) continue;
+    if (winner.type === 'poll' && winner.serial) { serial = winner.serial; break; }
+    // scan: перебираем найденные порты (обычно 1–2)
+    for (const p of (winner.ports || [])) {
+      serial = await tryPort(p);
+      if (serial || s.cancelled) break;
     }
-  } catch (e) {}
-  const c5555 = await adb.connect(host, 5555);
-  return c5555.ok ? host + ':5555' : null;
+    if (!serial && winner.type === 'scan' && !(winner.ports || []).length) {
+      // свип ничего не нашёл — пробуем mDNS-порт отладки напрямую
+      const recs = await mdns.discover(700).catch(() => []);
+      const all = (recs || []).concat((await adb.mdnsServices().catch(() => ({ items: [] }))).items || []);
+      const conn = all.find(r => String(r.service || '').includes('_adb-tls-connect') && r.host === host && r.port);
+      if (conn) serial = await tryPort(conn.port);
+    }
+    if (winner.type === 'scan') {
+      // свип завершён; ждём только poll до конца таймаута
+      const r = await Promise.race([pollP, sleep(Math.max(0, CONNECT_TIMEOUT_MS - (Date.now() - t0))).then(() => null)]);
+      serial = r || serial;
+      break;
+    }
+  }
+  stopped = true;
+  return serial;
 }
 
 module.exports = { start, cancel, isRunning };

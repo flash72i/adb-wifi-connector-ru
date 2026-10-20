@@ -285,26 +285,54 @@ function runSync(args, timeoutMs = 8000) {
 
 function killServer() { return runSync(['kill-server'], 6000); }
 
-// Сканирование диапазона портов беспроводной отладки на одном хосте
-function portRangeScan(host, from = 30000, to = 44999, concurrency = 250, timeoutMs = 400) {
+// Сканирование диапазона портов беспроводной отладки на одном хосте.
+// v2.7.0: ДОБАВЛЕН режим раннего выхода (opts.early) — как только найден первый открытый
+// порт, ждём graceMs и возвращаем найденное. Причина: полный свип 15 000 портов занимает
+// ~24 с, а порт сопряжения/подключения находится в первой сотне миллисекунд сканирования —
+// из-за этого сопряжение «висело» в фазе «Подключение…» десятки секунд (жалоба v2.6.0).
+function portRangeScan(host, from = 30000, to = 44999, concurrency = 250, timeoutMs = 400, opts = {}) {
+  const early = !!opts.early;
+  const graceMs = Math.max(200, opts.graceMs || 900);
+  const onFound = typeof opts.onFound === 'function' ? opts.onFound : null;
   return new Promise((resolve) => {
     const open = [];
     let next = from;
     let active = 0;
+    let finished = false;
+    let firstFoundAt = 0;
+    let earlyTimer = null;
+    const finish = () => {
+      if (finished) return;
+      finished = true;
+      clearTimeout(earlyTimer);
+      resolve(open.sort((a, b) => a - b));
+    };
+    const maybeEarlyExit = () => {
+      if (!early || !open.length || finished) return;
+      if (!firstFoundAt) { firstFoundAt = Date.now(); }
+      if (!earlyTimer) earlyTimer = setTimeout(finish, graceMs);
+    };
     const tick = () => {
+      if (finished) return;
       while (active < concurrency && next <= to) {
         const port = next++;
         active++;
         tcpProbe(host, port, timeoutMs).then(ok => {
-          if (ok) open.push(port);
+          if (ok) { open.push(port); if (onFound) try { onFound(port); } catch (e) {} }
           active--;
-          if (next > to && active === 0) resolve(open.sort((a, b) => a - b));
-          else tick();
+          if (finished) return;
+          if (next > to && active === 0) finish();
+          else { maybeEarlyExit(); tick(); }
         });
       }
     };
     tick();
   });
+}
+
+// Быстрый свип: ранний выход после первого найденного порта (v2.7.0 — скорость сопряжения)
+function portScanFast(host, opts = {}) {
+  return portRangeScan(host, 30000, 44999, 320, 350, Object.assign({ early: true, graceMs: 900 }, opts));
 }
 
 // Быстрый TCP-пробник host:port
@@ -319,7 +347,7 @@ function tcpProbe(host, port, timeoutMs = 600) {
 }
 
 module.exports = {
-  setAdbPath, getAdbPath, run, runSync, killServer, tcpProbe, portRangeScan, version, devices, modelName, connect, disconnect,
+  setAdbPath, getAdbPath, run, runSync, killServer, tcpProbe, portRangeScan, portScanFast, version, devices, modelName, connect, disconnect,
   pair, mdnsServices, scanSubnet, shellCmd, shellRun, shq, shellJoin, screenshot, startRecord, pull,
   installApk, startLogcat, pingDevice
 };

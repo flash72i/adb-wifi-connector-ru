@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; script-src 'self'">
+<title>Установка APK — ADB Wi-Fi Коннектор</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body data-theme="dark" class="mini-win">
+
+<!-- Заголовок: перетаскивание окна за эту полосу (frameless-окно) -->
+<header id="mini-titlebar">
+  <div class="tb-left">
+    <img src="../assets/icon.png" alt="" class="tb-icon">
+    <span class="tb-title">Установка APK</span>
+    <span class="tb-badge">быстрое окно</span>
+  </div>
+  <div class="tb-buttons">
+    <button class="tb-btn tb-close" id="mini-close" data-tip="Закрыть">&#x2715;</button>
+  </div>
+</header>
+
+<div id="mini-body">
+  <div class="mini-head">
+    <img id="mini-icon" src="" alt="">
+    <div class="grow2" style="min-width:0">
+      <div class="mini-title" id="mini-title">Читаю файл…</div>
+      <div class="mini-sub" id="mini-sub"></div>
+    </div>
+  </div>
+
+  <div class="muted small mono" id="mini-file" style="word-break:break-all;margin-bottom:10px"></div>
+
+  <div id="mini-meta" class="muted small" style="line-height:1.75"></div>
+
+  <label class="field" style="margin-top:12px">
+    <span>Установить на устройство</span>
+    <select id="mini-target" class="select" autocomplete="off"></select>
+  </label>
+
+  <div class="row" style="margin-top:10px;align-items:center">
+    <button class="btn btn-tonal" id="mini-connect" data-tip="Подключить это устройство (IP:порт), не открывая основную программу">Подключить…</button>
+    <button class="btn btn-text" id="mini-refresh" data-tip="Обновить список устройств">&#8635;</button>
+    <span class="grow"></span>
+    <button class="btn btn-filled" id="mini-install" disabled>Установить</button>
+  </div>
+  <div class="row" id="mini-conn-row" style="margin-top:8px">
+    <input type="text" id="mini-conn-ip" class="grow" placeholder="IP:порт с экрана «Беспроводная отладка» (например 192.168.1.6:44515)" spellcheck="false">
+    <button class="btn btn-tonal btn-sm" id="mini-conn-go">Подключить</button>
+  </div>
+
+  <div class="mini-progress hidden" id="mini-progress"><div class="bar" id="mini-bar"></div></div>
+  <div class="muted small" id="mini-status" style="margin-top:8px;min-height:18px"></div>
+</div>
+
+<div id="snackbar" class="snackbar hidden"></div>
+<script src="apkmini.js"></script>
+</body>
+</html>

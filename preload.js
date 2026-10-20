@@ -82,14 +82,19 @@ contextBridge.exposeInMainWorld('api', {
   appsPerm: invoke('apps:perm'),
   appsBackup: invoke('apps:backup'),
   appsIcon: invoke('apps:icon'),         // → { ok, dataUrl?, label? }
+  appsIconPeek: invoke('apps:icon-peek'),   // v2.7: иконка ТОЛЬКО из кэша (для процессов, без скачивания APK)
   appsLabels: invoke('apps:labels'),     // весь известный кэш имён { pkg: name }
   procsList: invoke('procs:list'),
   procsKill: invoke('procs:kill'),
   procsKillApps: invoke('procs:killapps'),  // v2.6: «Завершить все приложения»
   devFull: invoke('dev:full'),
   fsVolumes: invoke('fs:volumes'),
-  fsCat: invoke('fs:cat'),                  // v2.6: бинарное чтение файла (просмотрщик/плеер)
+  fsCat: invoke('fs:cat'),                  // v2.6: бинарное чтение файла (просмотрщик/плеер); v2.7: + maxMB
+  fsOpenOnPc: invoke('fs:open-on-pc'),      // v2.7: скачать во временную папку и открыть системной программой (браузер/плеер/PDF)
+  fsExtract: invoke('fs:extract'),          // v2.7: распаковка архива в папку с именем архива (свойства файла)
+  shellOpenPath: invoke('shell:open-path'), // v2.7: открыть локальный файл системной программой
   apkLocalMeta: invoke('apk:localmeta'),    // v2.6: иконка/имя/пакет/версия локального APK
+  apkRemoteMeta: invoke('apk:remotemeta'),  // v2.7: иконка/имя APK-файла, лежащего НА ТЕЛЕФОНЕ
   apkInstallBatch: invoke('apk:installbatch'), // v2.6: очередь установки (apk/xapk/apks/obb)
   apkInstallCancel: invoke('apk:installcancel'),
   appsMeta: invoke('apps:meta'),            // v2.6: размеры/даты для сортировки
@@ -102,6 +107,7 @@ contextBridge.exposeInMainWorld('api', {
   onMirrorChunk: (cb) => ipcRenderer.on('mirror:chunk', (_e, buf) => cb(buf)),
   onMirrorJpeg: (cb) => ipcRenderer.on('mirror:jpeg', (_e, frame) => cb(frame)), // {seq, buf}
   onShellOut: (cb) => ipcRenderer.on('shell:out', (_e, t) => cb(t)),
+  onApkMiniFile: (cb) => ipcRenderer.on('apkmini:file', (_e, p) => cb(p)), // v2.7: новое имя APK в мини-окне
 
   // события из main
   onLogcat: (cb) => ipcRenderer.on('logcat:lines', (_e, lines) => cb(lines)),

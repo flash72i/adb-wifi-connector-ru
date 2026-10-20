@@ -76,7 +76,26 @@
     so: ['#607d8b', 'db'], bin: ['#607d8b', 'db'], dat: ['#607d8b', 'generic']
   };
   const cache = {};
+  // v2.7.0: маленький Android-бейдж (наложение в углу иконки APK) — как просил владелец:
+  // «под иконкой углу, этот значок такой маленький». Зелёная голова робота на тёмной плашке.
+  const ANDROID_BADGE = (function () {
+    const svg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">' +
+      '<circle cx="16" cy="16" r="15" fill="#101418" opacity=".92"/>' +
+      '<circle cx="16" cy="16" r="15" fill="none" stroke="#3ddc84" stroke-width="1.4"/>' +
+      '<path d="M10.4 13.1a5.9 5.9 0 0 1 11.2 0z" fill="#3ddc84"/>' +
+      '<circle cx="13.6" cy="11.4" r=".85" fill="#101418"/><circle cx="18.4" cy="11.4" r=".85" fill="#101418"/>' +
+      '<path d="M9.6 8.2l1.5 2.2M22.4 8.2l-1.5 2.2" stroke="#3ddc84" stroke-width="1.5" stroke-linecap="round"/>' +
+      '<rect x="10.1" y="14" width="11.8" height="6.6" rx="1.2" fill="#3ddc84"/>' +
+      '<rect x="8.4" y="14.6" width="1.7" height="5.2" rx=".85" fill="#3ddc84"/>' +
+      '<rect x="21.9" y="14.6" width="1.7" height="5.2" rx=".85" fill="#3ddc84"/>' +
+      '<rect x="11.9" y="21" width="1.7" height="3.6" rx=".85" fill="#3ddc84"/>' +
+      '<rect x="15.15" y="21" width="1.7" height="3.6" rx=".85" fill="#3ddc84"/>' +
+      '<rect x="18.4" y="21" width="1.7" height="3.6" rx=".85" fill="#3ddc84"/>' +
+      '</svg>';
+    return 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svg);
+  })();
   window.FSICONS = {
+    ANDROID_BADGE,
     // возвращает { src, letter, color } — src = data:URI SVG; letter — если иконки нет
     iconFor(name, isDir) {
       if (isDir) {

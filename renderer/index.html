@@ -277,10 +277,18 @@
           <button class="btn btn-tonal" id="btn-fs-push">Загрузить на телефон</button>
           <button class="btn btn-text" id="btn-fs-mkdir">Новая папка</button>
         </div>
-        <div class="chips" id="fs-quick" style="margin-top:8px" data-tip="Быстрые переходы"></div>
+        <div class="row" style="margin-top:8px">
+          <div class="chips" id="fs-views" data-tip="Вид списка — как в Проводнике Windows">
+            <button class="chip view-chip active" data-view="list" data-tip="Список с деталями (размер, дата)">☰ Список</button>
+            <button class="chip view-chip" data-view="icons" data-tip="Значки среднего размера">▦ Значки</button>
+            <button class="chip view-chip" data-view="xl" data-tip="Огромные значки с миниатюрами фото">▣ Огромные</button>
+          </div>
+          <span class="grow"></span>
+          <input type="text" id="fs-filter" class="input-sm" placeholder="Фильтр по имени…" spellcheck="false">
+        </div>
+        <div class="chips" id="fs-quick" data-tip="Быстрые переходы"></div>
         <div class="chips" id="fs-volumes" style="margin-top:6px"></div>
         <div class="muted small" id="fs-storage" style="margin-top:6px"></div>
-        <input type="text" id="fs-filter" class="input-sm" placeholder="Фильтр по имени…" spellcheck="false" style="margin-top:8px">
         <div id="fs-list" class="list" style="margin-top:10px"></div>
         <div class="empty hidden" id="fs-empty" style="margin-top:10px">
           <div id="fs-empty-title" style="font-weight:600">Файлы появятся здесь сразу после подключения</div>
@@ -555,12 +563,14 @@
       <button class="btn btn-tonal btn-sm" id="imgview-prev" data-tip="Предыдущее изображение (←)">◀</button>
       <span class="mono small" id="imgview-pos"></span>
       <button class="btn btn-tonal btn-sm" id="imgview-next" data-tip="Следующее изображение (→)">▶</button>
-      <button class="btn btn-tonal btn-sm" id="imgview-full" data-tip="Во весь экран (двойной клик)">Во весь экран</button>
+      <button class="btn btn-tonal btn-sm" id="imgview-full" data-tip="Во весь экран внутри программы (двойной клик)">В окне</button>
+      <button class="btn btn-tonal btn-sm" id="imgview-fullmon" data-tip="Во весь ЭКРАН компьютера (на весь монитор)">На весь монитор</button>
     </div>
     <div class="imgview-stage" id="imgview-stage">
       <img id="imgview-img" class="imgview-img" alt="">
       <div class="imgview-msg" id="imgview-msg">Загрузка…</div>
     </div>
+    <div class="filmstrip" id="imgview-strip" aria-label="Следующие изображения"></div>
     <div class="muted small" id="imgview-status" style="margin-top:6px"></div>
   </div>
 </div>
@@ -575,7 +585,7 @@
     <div class="media-stage" id="media-stage">
       <video id="media-el" class="hidden" playsinline></video>
       <div id="media-visual" class="media-visual">
-        <canvas id="media-vis" width="640" height="220"></canvas>
+        <canvas id="media-vis" width="960" height="320"></canvas>
         <div class="media-3dwrap" id="media-3dwrap"><div class="media-cube" id="media-cube">&#9835;</div></div>
       </div>
     </div>
@@ -591,21 +601,52 @@
       <input type="range" id="media-seek" min="0" max="1000" value="0" class="grow" data-tip="Позиция воспроизведения">
       <span data-tip="Громкость">&#128266;</span><input type="range" id="media-vol" min="0" max="100" value="80" style="width:80px">
       <button class="btn btn-tonal btn-sm" id="media-eqbtn" data-tip="Эквалайзер и визуализация">EQ</button>
-      <button class="btn btn-tonal btn-sm" id="media-full" data-tip="Во весь экран">&#x26F6;</button>
+      <button class="btn btn-tonal btn-sm" id="media-dl" data-tip="Скачать файл на компьютер">&#8681; Скачать</button>
+      <button class="btn btn-tonal btn-sm" id="media-openpc" data-tip="Скачать и открыть системным плеером — проиграет ЛЮБОЙ формат (mkv и редкие кодеки)">&#9654; На ПК</button>
+      <button class="btn btn-tonal btn-sm" id="media-full" data-tip="Во весь экран внутри программы">В окне</button>
+      <button class="btn btn-tonal btn-sm" id="media-fullmon" data-tip="Во весь ЭКРАН компьютера (на весь монитор)">На весь монитор</button>
+    </div>
+    <div class="media-visnav">
+      <button class="btn btn-tonal btn-sm" id="media-vis-prev" data-tip="Предыдущая визуализация">◀</button>
+      <span class="media-vis-name" id="media-vis-name">1. Столбики</span>
+      <button class="btn btn-tonal btn-sm" id="media-vis-next" data-tip="Следующая визуализация">▶</button>
+      <span class="muted small" id="media-vis-hint">визуализация живёт даже на паузе, а в игре — двигается в такт музыке</span>
     </div>
     <div id="media-eq" class="hidden">
       <div class="eq-row" id="eq-bands"></div>
       <div class="row" style="margin-top:8px">
         <span class="muted small">Пресеты:</span>
         <span class="chips" id="eq-presets"></span>
-        <span class="grow"></span>
-        <span class="muted small">Визуализация:</span>
-        <button class="chip eq-vchip active" data-vis="bars">Столбики</button>
-        <button class="chip eq-vchip" data-vis="wave">Волна</button>
-        <button class="chip eq-vchip" data-vis="circle">Круг</button>
       </div>
     </div>
     <div class="muted small" id="media-status" style="margin-top:6px"></div>
+  </div>
+</div>
+
+<!-- ===== Диалог: текстовый файл / PDF (v2.7) ===== -->
+<div class="overlay hidden" id="dlg-textview">
+  <div class="dialog textview-dlg" id="textview-shell">
+    <div class="dialog-head">
+      <h2 id="textview-title" style="font-size:15px;word-break:break-all">Просмотр</h2>
+      <button class="dlg-x" data-close="dlg-textview">&#x2715;</button>
+    </div>
+    <div class="row imgview-toolbar">
+      <button class="btn btn-tonal btn-sm" id="textview-wrap" data-tip="Включить/выключить перенос длинных строк">Перенос строк</button>
+      <span class="mono small" id="textview-pos"></span>
+      <span class="grow"></span>
+      <button class="btn btn-tonal btn-sm" id="textview-dl" data-tip="Скачать файл на компьютер">&#8681; Скачать</button>
+      <button class="btn btn-tonal btn-sm" id="textview-openpc" data-tip="Открыть системной программой (браузер / PDF-читалка)">Открыть на ПК</button>
+    </div>
+    <pre id="textview-pre" class="textview-pre"></pre>
+    <div id="pdfview-box" class="hidden">
+      <canvas id="pdfview-canvas"></canvas>
+      <div class="row" style="justify-content:center;margin-top:8px">
+        <button class="btn btn-tonal btn-sm" id="pdfview-prev">◀ Страница</button>
+        <span class="mono small" id="pdfview-page">–</span>
+        <button class="btn btn-tonal btn-sm" id="pdfview-next">Страница ▶</button>
+      </div>
+    </div>
+    <div class="muted small" id="textview-status" style="margin-top:6px"></div>
   </div>
 </div>
 
@@ -644,6 +685,7 @@
 <script src="fsicons.js"></script>
 <script src="cmdlib.js"></script>
 <script src="procdesc.js"></script>
+<script src="vislib.js"></script>
 <script src="app.js"></script>
 </body>
 </html>
